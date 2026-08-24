@@ -380,6 +380,7 @@ cost accuracy there. Measure it on the model you actually use.
 | `run_source_manage.py` | ✅ fully | runs a management command in your app with its environment loaded; `--db-from` points at another deployment's database while keeping local library paths |
 | `make_cost_urls.py` | ✅ fully | builds the URL list for token-cost measurement |
 | `smoke_manifest.py` | ✅ fully | minimal dataset from a folder of JPEGs |
+| `verify_published_figures.py` | ⚠️ project-specific | re-derives every number in `reports/` from the raw run files, using none of this package's code |
 | `run_export.py` | ✅ wrapper | loads the app's `.env` without shell quoting problems and runs the export |
 | `export_staging_dataset.py` | ⚠️ template | written against one Django schema — adapt to yours |
 | `count_volume.py` | ⚠️ template | same: adapt the model and field names |
@@ -449,6 +450,17 @@ Then:
 
 Commands that reach a model or a database are verified by running them, not by their `--help`. Say
 which ones were not run and why — "a 17 GB download" is a reason, "should work" is not.
+
+And when a report has been written, re-derive it:
+
+```bash
+python scripts/verify_published_figures.py
+```
+
+It recomputes every published number straight from `runs/` and `data/` with an independent
+implementation — importing nothing from this package, so a bug in `metrics.py` cannot confirm itself. A
+MISMATCH means either the report is wrong or the data has moved since it was written; both matter
+before someone forwards the document. It has already caught a report drifting from its data once.
 
 ## Privacy: what is safe to publish
 
