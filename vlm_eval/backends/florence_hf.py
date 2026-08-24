@@ -32,22 +32,34 @@ class FlorenceBackend:
     name = "florence-2-large"
 
     def __init__(
-        self, checkpoint: str = "microsoft/Florence-2-large", device: str | None = None, dtype: str = "float16"
+        self,
+        checkpoint: str = "florence-community/Florence-2-large",
+        device: str | None = None,
+        dtype: str = "float16",
     ):
-        import torch  # lazy: heavy optional dependency
-        from transformers import AutoModelForCausalLM, AutoProcessor
+        import torch
+        from transformers import AutoProcessor
 
         self.checkpoint = checkpoint
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         self.device = device
         self.torch_dtype = getattr(torch, dtype) if self.device != "cpu" else torch.float32
-        self.model = (
-            AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype=self.torch_dtype, trust_remote_code=True)
-            .to(self.device)
-            .eval()
-        )
-        self.processor = AutoProcessor.from_pretrained(checkpoint, trust_remote_code=True)
+
+        # The `microsoft/Florence-2-*` repos ship custom modelling code written for older transformers;
+        # it raises on 4.50+ (missing `forced_bos_token_id`). The `florence-community/*` ports are the
+        # same weights against the class that now lives in transformers, so no trust_remote_code.
+        try:
+            from transformers import Florence2ForConditionalGeneration as _Model
+
+            kwargs = {}
+        except ImportError:  # transformers too old for the native class
+            from transformers import AutoModelForCausalLM as _Model
+
+            kwargs = {"trust_remote_code": True}
+
+        self.model = _Model.from_pretrained(checkpoint, torch_dtype=self.torch_dtype, **kwargs).to(self.device).eval()
+        self.processor = AutoProcessor.from_pretrained(checkpoint, **kwargs)
         self.name = checkpoint.split("/")[-1].lower()
 
     def run(self, image, task: str, text: str = "", max_new_tokens: int = 1024) -> tuple[Any, float]:

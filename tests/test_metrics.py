@@ -71,3 +71,42 @@ def test_grounding_stats_does_not_score_targets_without_a_tag():
     assert g["fireplace"]["not_comparable_detected"] == 1
     assert g["fireplace"]["recall_vs_reference"] is None
     assert g["fireplace"]["fp_rate_vs_reference"] is None
+
+
+def test_economics_breakeven_and_peak():
+    from vlm_eval.economics import Inputs, break_even_images, monthly_gpu_cost, peak_analysis, render
+
+    inp = Inputs(
+        api_cost_per_image=0.001,
+        api_cost_per_image_optimized=0.0005,
+        gpu_usd_per_hour=1.0,
+        gpu_images_per_hour=1000,
+        peak_hour_images=5000,
+        busy_hours_pct=10.0,
+        scenarios=[("small", 10_000), ("big", 100_000)],
+    )
+    # 10k images at 1000/h = 10 GPU-hours at $1
+    assert monthly_gpu_cost(10_000, inp) == 10.0
+    # a GPU that never sleeps costs 730 -> break-even at 730/0.001
+    assert break_even_images(inp) == 730_000
+    # never charge more than running non-stop
+    assert monthly_gpu_cost(10_000_000, inp) == 730.0
+
+    peak = peak_analysis(inp)
+    assert peak["hours_for_one_gpu"] == 5.0
+    assert peak["gpus_to_absorb_in_one_hour"] == 5
+
+    md = render(inp, currency_note="test note")
+    assert "Break-even for a GPU running non-stop: 730,000" in md
+    assert "5 GPUs at once" in md
+    assert "Not yet." in md  # 100k/month is below break-even
+    assert "test note" in md
+
+
+def test_economics_verdict_flips_past_break_even():
+    from vlm_eval.economics import Inputs, render
+
+    inp = Inputs(
+        api_cost_per_image=0.01, gpu_usd_per_hour=1.0, gpu_images_per_hour=1000, scenarios=[("huge", 1_000_000)]
+    )
+    assert "Worth building." in render(inp)

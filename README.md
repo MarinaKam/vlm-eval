@@ -28,7 +28,8 @@ Every step writes plain files, and every step can be interrupted and resumed.
 ```bash
 uv venv --python 3.12 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
-.venv/bin/pytest                                       # 29 tests, all should pass
+source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
+.venv/bin/pytest                                       # 31 tests, all should pass
 ```
 
 `.env` holds everything machine-specific. It is gitignored, as are `data/`, `runs/` and `reports/`.
@@ -40,7 +41,7 @@ cp .env.example .env                                   # edit: point VLM_EVAL_SO
 ### Step 1.1 Export from your database
 
 ```bash
-.venv/bin/python scripts/run_export.py
+python scripts/run_export.py
 ```
 
 **Why:** the benchmark has to be your own images, and the reference answers have to be what your current
@@ -59,7 +60,7 @@ minimal manifest from a folder of JPEGs.
 ### Step 1.2 Fetch the images
 
 ```bash
-.venv/bin/vlm-eval download
+vlm-eval download
 ```
 
 **Why:** models are fed local files, resized and compressed exactly the way production does it, so every
@@ -72,20 +73,23 @@ multi-image summaries — those are a separate set from the sampled manifest.
 
 Anything with an OpenAI-compatible API works: **Ollama** for a laptop, **vLLM** for a real GPU.
 
+Models are named by **preset** — `models.json` holds the connection details, so commands stay short:
+
 ```bash
-# tagging: the batched yes/no questions, in production's own chunking
-.venv/bin/vlm-eval run --model qwen3-vl-8b --served-name qwen3-vl:8b \
-    --base-url http://localhost:11434/v1 --flavor ollama --task tagging
+vlm-eval run qwen3 tagging              # the batched yes/no questions, production's own chunking
+vlm-eval run qwen3 tagging --chunk 0    # every question in ONE call — see the cost section
+vlm-eval run qwen3 tagging --repeats 3 --limit 100   # same image 3x: is the model consistent?
+vlm-eval run qwen3 captions             # short + detailed descriptions
+vlm-eval run qwen3 grounding            # bounding boxes for specific features
+vlm-eval run qwen3 summary              # one description from all photos of a listing
+```
 
-# same, but ask every question in ONE call — see "is the chunk size justified?" below
-.venv/bin/vlm-eval run ... --task tagging --chunk 0
+Add a preset to `models.json` (`run_name`, `served_name`, `flavor`, `base_url`, `coords`) and it works
+everywhere. Any field can still be overridden with a flag, and a name that is not a preset is used as-is
+— so a one-off vLLM server needs no preset:
 
-# same image three times — does the model answer consistently?
-.venv/bin/vlm-eval run ... --task tagging --repeats 3 --limit 100
-
-.venv/bin/vlm-eval run ... --task captions     # short + detailed descriptions
-.venv/bin/vlm-eval run ... --task grounding    # bounding boxes for specific features
-.venv/bin/vlm-eval run ... --task summary      # one description from all photos of a listing
+```bash
+vlm-eval run my-model tagging --served-name Qwen/Qwen3-VL-8B-Instruct --base-url http://localhost:8000/v1 --flavor vllm
 ```
 
 Useful flags: `--limit N` (subset), `--workers N` (concurrency, for a server), `--no-logprobs` (Ollama
@@ -94,10 +98,13 @@ doesn't expose them), `--coords abs|norm1000` (bbox convention differs per model
 Models with no server run directly:
 
 ```bash
-.venv/bin/vlm-eval florence --task captions --limit 300          # Florence-2, task-token model
-.venv/bin/vlm-eval hf --backend internvl  --task tagging --limit 150
-.venv/bin/vlm-eval hf --backend paligemma --task tagging --limit 150   # gated repo: needs HF_TOKEN
+vlm-eval florence captions --limit 300      # Florence-2, task-token model
+vlm-eval hf internvl tagging --limit 150    # ~17 GB download on first run
+vlm-eval hf paligemma tagging --limit 150   # ~6 GB, gated repo: accept the licence, set HF_TOKEN
 ```
+
+Florence-2 defaults to the `florence-community/*` port: the original `microsoft/*` repos ship custom
+code that no longer runs on current transformers.
 
 Batch scripts for a full sweep: `scripts/run_all_local.sh` (Ollama models),
 `scripts/run_hf_models.sh` (transformers models), `scripts/finish_minimal.sh` (a short top-up when you
@@ -112,7 +119,7 @@ need every capability measured but not at full sample size).
 ### Step 3.1 Compute metrics
 
 ```bash
-.venv/bin/vlm-eval metrics --model qwen3-vl-8b     # -> runs/<model>/metrics.json
+vlm-eval metrics qwen3      # -> runs/<model>/metrics.json
 ```
 
 Agreement with the reference per tag, precision/recall/false-positive rate, consistency across repeats,
@@ -121,8 +128,8 @@ latency, caption lengths, detection rates.
 ### Step 3.2 Judge the disagreements yourself
 
 ```bash
-.venv/bin/vlm-eval review --model qwen3-vl-8b                         # builds an HTML page
-.venv/bin/vlm-eval review --model qwen3-vl-8b --decisions <file.json> # merge your verdicts
+vlm-eval review qwen3                          # builds an HTML page
+vlm-eval review qwen3 --decisions <file.json>  # merge your verdicts back in
 ```
 
 **Why this matters more than any other step:** the reference is a paid API, not ground truth, and it is
@@ -136,8 +143,8 @@ download a decisions file. Verdicts are keyed to (image, tag), so you can review
 ### Step 3.3 Render reports
 
 ```bash
-.venv/bin/vlm-eval report  --model qwen3-vl-8b       # reports/<model>.md
-.venv/bin/vlm-eval compare --models a b c            # reports/comparison.md
+vlm-eval report qwen3               # reports/<model>.md
+vlm-eval compare qwen3 qwen2.5      # reports/comparison.md
 ```
 
 Capability and performance tables per model, plus one comparison table. Facts that cannot be measured
@@ -155,7 +162,7 @@ GPU idles most of the time and costs more.
 ### How much do you actually process?
 
 ```bash
-.venv/bin/python scripts/run_source_manage.py shell --stdin scripts/count_volume.py
+python scripts/run_source_manage.py shell --stdin scripts/count_volume.py
 ```
 
 Images per month, busiest days and hours, and what fraction of hours have any work at all. That last
@@ -165,7 +172,7 @@ The session is switched to read-only at the Postgres level first, so an accident
 database error. Safe to point at production:
 
 ```bash
-.venv/bin/python scripts/run_source_manage.py shell --db-from /path/to/prod.env --stdin scripts/count_volume.py
+python scripts/run_source_manage.py shell --db-from /path/to/prod.env --stdin scripts/count_volume.py
 ```
 
 ### Is the chunk size justified?
@@ -174,9 +181,23 @@ Production splits the questions into chunks and re-sends the image with each one
 dominant cost. To find out what that costs and what one big call would cost instead:
 
 ```bash
-.venv/bin/python scripts/make_cost_urls.py --type indoor --limit 60
+python scripts/make_cost_urls.py --type indoor --limit 60
 # then run your app's token-measuring command at different chunk sizes and diff the tag sets
 ```
+
+### Put it together: is switching worth it?
+
+```bash
+vlm-eval economics          # -> reports/economics.md
+```
+
+Reads `data/economics.json` — the numbers you measured above (cost per image, GPU price and throughput,
+volume scenarios, busiest hour) — and writes the whole argument: cost per scenario, the break-even
+volume, what the busiest hour demands of self-hosted capacity, and a verdict. Run it without the config
+and it prints a filled-in example to start from.
+
+The peak matters more than the average. A vendor absorbs a burst invisibly; your own hardware answers it
+either by paying for idle capacity or by delaying the queue.
 
 Do **not** assume the answer transfers between models: in our run the open model gave 98.9% identical
 answers with all questions in one call, while the paid API dropped ~6% of its tags. Halving the bill
@@ -195,6 +216,8 @@ cost accuracy there. Measure it on the model you actually use.
 | `export_staging_dataset.py` | ⚠️ template | written against one Django schema — adapt to yours |
 | `count_volume.py` | ⚠️ template | same: adapt the model and field names |
 | `extract_tags_from_migrations.py` | ⚠️ template | fallback source for tag questions |
+
+Model presets live in `models.json`; measured economics inputs in `data/economics.json`.
 
 ---
 

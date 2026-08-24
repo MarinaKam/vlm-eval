@@ -1,0 +1,17 @@
+{
+  "_comment": "Model presets so commands stay short: `vlm-eval run qwen3 tagging`. `run_name` is the folder under runs/ and the name used in reports; the rest is how to reach the model.",
+  "qwen3": {
+    "run_name": "qwen3-vl-8b-ollama",
+    "served_name": "qwen3-vl:8b",
+    "flavor": "ollama",
+    "base_url": "http://localhost:11434/v1",
+    "coords": "norm1000"
+  },
+  "qwen2.5": {
+    "run_name": "qwen2.5vl-7b-ollama",
+    "served_name": "qwen2.5vl:7b",
+    "flavor": "ollama",
+    "base_url": "http://localhost:11434/v1",
+    "coords": "abs"
+  }
+}
