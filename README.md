@@ -134,6 +134,10 @@ The tag questions and prompt texts live only in your DB and in `data/` — they 
 - Cost estimates are "GPU-hours at measured throughput × the card's hourly price" — real bills add
   idle time, autoscaling headroom and egress.
 
+## License
+
+MIT — see [LICENSE](LICENSE).
+
 ## Author
 
-[Marie Kam](https://github.com/MarinaKam) · MIT licence
+[Marie Kam](https://github.com/MarinaKam)
