@@ -1,5 +1,8 @@
 """Count processed images per month (READ-ONLY) — the number that decides self-host vs pay-per-call.
 
+Like the export script, this one is written against a particular Django schema: adapt the model names
+and field names to your own, or replace it with the equivalent query for your backend.
+
 Run through the wrapper so the source app's environment is loaded:
 
     python scripts/run_source_manage.py shell < scripts/count_volume.py
@@ -13,9 +16,16 @@ from collections import Counter, defaultdict
 from datetime import timedelta
 
 from computer_vision.models import ImageProcessingJob, PropertyProcessingJob
+from django.db import connection
 from django.db.models import Count
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
+
+# Postgres-level guard: every transaction in this session becomes read-only, so an accidental write
+# fails with an error instead of touching the database. Safe to point at production.
+with connection.cursor() as _cur:
+    _cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
+print("сессия переведена в режим только для чтения")
 
 MONTHS_BACK = 12
 since = timezone.now() - timedelta(days=30 * MONTHS_BACK)
