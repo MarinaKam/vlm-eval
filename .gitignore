@@ -14,3 +14,5 @@ runs/
 reports/
 
 .idea/
+# Adjudication/review decisions: contain real image ids
+decisions_*.json

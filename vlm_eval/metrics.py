@@ -137,24 +137,45 @@ def caption_stats(rows: list[dict]) -> dict[str, Any]:
     }
 
 
-def grounding_stats(rows: list[dict], gemini: dict[int, dict]) -> dict[str, Any]:
-    """Detection rate per target on images where Gemini tagged it present vs absent (sanity of localisation)."""
+def grounding_stats(rows: list[dict], gemini: dict[str, dict]) -> dict[str, Any]:
+    """Detection rate per target, scored only where the reference actually has a verdict.
+
+    A target is comparable on an image only if the matching classification tag was asked there
+    (`evaluable_slugs`). Targets with no corresponding tag at all, and image types that never get that
+    question (a radiator is only asked indoors), are counted as `not_comparable` instead of being
+    silently scored as absences — otherwise every detection of an unknown object reads as a false
+    positive.
+    """
     out: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"pos_img": 0, "pos_detected": 0, "neg_img": 0, "neg_detected": 0}
+        lambda: {
+            "pos_img": 0,
+            "pos_detected": 0,
+            "neg_img": 0,
+            "neg_detected": 0,
+            "not_comparable": 0,
+            "not_comparable_detected": 0,
+        }
     )
     for r in rows:
-        g = gemini.get(r["image_id"], {}).get("tags", {})
+        g = gemini.get(r["image_id"]) or {}
+        evaluable = set(g.get("evaluable_slugs") or [])
+        tags = g.get("tags", {})
         for label, dets in (r.get("detections") or {}).items():
             if dets is None:
                 continue
-            key = "pos" if label in g else "neg"
-            out[label][f"{key}_img"] += 1
-            out[label][f"{key}_detected"] += int(bool(dets))
+            c = out[label]
+            if label not in evaluable:
+                c["not_comparable"] += 1
+                c["not_comparable_detected"] += int(bool(dets))
+                continue
+            key = "pos" if label in tags else "neg"
+            c[f"{key}_img"] += 1
+            c[f"{key}_detected"] += int(bool(dets))
     return {
         label: {
             **c,
-            "recall_vs_gemini": _pct(c["pos_detected"], c["pos_img"]),
-            "fp_rate_vs_gemini": _pct(c["neg_detected"], c["neg_img"]),
+            "recall_vs_reference": _pct(c["pos_detected"], c["pos_img"]),
+            "fp_rate_vs_reference": _pct(c["neg_detected"], c["neg_img"]),
         }
         for label, c in out.items()
     }

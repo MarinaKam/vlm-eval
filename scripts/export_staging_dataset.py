@@ -68,7 +68,10 @@ print(
     f"{len(all_tags) - len(active_tags)} inactive)"
 )
 
-caption_prompts = {p["key__slug"]: p["text"] for p in Prompt.objects.select_related("key").values("key__slug", "text")}
+# Only prompts whose feature is active: the DB also holds retired and placeholder prompts (in one
+# deployment two still contained Lorem ipsum), and running those would measure nothing.
+_active_prompts = Prompt.objects.select_related("key").filter(key__is_active=True)
+caption_prompts = {p["key__slug"]: p["text"] for p in _active_prompts.values("key__slug", "text")}
 templates = {t["slug"]: t["text"] for t in PromptTemplate.objects.filter(is_active=True).values("slug", "text")}
 configs = {
     c["key"]: {k: v for k, v in c.items() if k != "key" and v is not None}

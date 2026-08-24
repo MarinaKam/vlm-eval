@@ -1,5 +1,5 @@
 #!/bin/zsh
-# PT-7104 full local runs on M4 Max via Ollama. Resumable: re-run after any interruption.
+# Full local runs on Apple silicon via Ollama. Resumable: re-run after any interruption.
 # Usage:  caffeinate -i zsh scripts/run_all_local.sh 2>&1 | tee -a runs/local_run.log
 set -e
 cd "$(dirname "$0")/.."

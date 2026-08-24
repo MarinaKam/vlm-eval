@@ -28,7 +28,9 @@ def _backend(a) -> OpenAICompatBackend:
 
 
 def cmd_download(a) -> None:
-    items = dataset.load_manifest()
+    # Property images are a separate set from the per-image manifest: the multi-image summary task
+    # needs every photo of a listing, and most of them are not in the sampled 1000.
+    items = dataset.load_manifest() + dataset.property_items()
     done, failed = dataset.download_all(items, force=a.force)
     print(f"downloaded {done}, failed {len(failed)}, total {len(items)}; failed ids: {failed[:20]}")
 

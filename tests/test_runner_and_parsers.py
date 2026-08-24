@@ -54,3 +54,17 @@ def test_grounding_parse_norm1000_and_abs():
 def test_tag_phrase_strips_parentheses():
     assert tag_phrase({"slug": "tile_floor", "name": "Tile Floor (Indoor)"}) == "tile floor"
     assert tag_phrase({"slug": "kitchen_island"}) == "kitchen island"
+
+
+def test_summary_refuses_to_run_on_a_partial_image_set(tmp_path):
+    prop = {"property_job_id": "p1", "image_ids": ["a", "b", "c"], "property_summary": "ref"}
+
+    class Boom:
+        def chat(self, *a, **k):
+            raise AssertionError("must not call the model without the full image set")
+
+    (tmp_path / "a.jpg").write_bytes(b"x")
+    row = runner.run_summary_one(Boom(), prop, "prompt", tmp_path)
+    assert row["summary"] is None
+    assert row["n_images"] == 1 and row["n_expected"] == 3
+    assert "1/3" in row["errors"][0]

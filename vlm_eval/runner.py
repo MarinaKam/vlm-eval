@@ -150,6 +150,23 @@ def run_grounding_one(backend: Backend, item: Item, targets: dict[str, str], cfg
 def run_summary_one(backend: Backend, prop: dict, prompt: str, images_dir: Path) -> dict[str, Any]:
     paths = [images_dir / f"{i}.jpg" for i in prop["image_ids"]]
     imgs = [p.read_bytes() for p in paths if p.exists()][: summary.MAX_IMAGES]
+    expected = min(len(prop["image_ids"]), summary.MAX_IMAGES)
+    if len(imgs) < expected:
+        # A model handed fewer images than the listing has still writes a fluent description — one
+        # given no images at all invented 130 words of it. Scoring that would measure nothing, so the
+        # row is recorded as a failure instead. Run `vlm-eval download` to fetch the listing images.
+        return {
+            "property_job_id": prop["property_job_id"],
+            "image_ids": prop["image_ids"][:expected],
+            "n_images": len(imgs),
+            "n_expected": expected,
+            "summary": None,
+            "gemini_summary": prop.get("property_summary"),
+            "latency_s": 0.0,
+            "usage": {},
+            "raw": "",
+            "errors": [f"only {len(imgs)}/{expected} listing images present on disk — run download"],
+        }
     t0 = time.perf_counter()
     try:
         r = backend.chat(

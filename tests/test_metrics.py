@@ -53,10 +53,21 @@ def test_caption_stats():
     assert s["empty_pct"] == 50.0 and s["mean_words"] == {"base_caption": 3.0}
 
 
-def test_grounding_stats():
+def test_grounding_stats_scores_only_comparable_images():
     rows = [
         {"image_id": 1, "detections": {"kitchen": [{"bbox": [0, 0, 1, 1]}]}},
         {"image_id": 2, "detections": {"kitchen": []}},
     ]
     g = metrics.grounding_stats(rows, GEMINI)
-    assert g["kitchen"]["recall_vs_gemini"] == 100.0 and g["kitchen"]["fp_rate_vs_gemini"] == 0.0
+    assert g["kitchen"]["recall_vs_reference"] == 100.0
+    assert g["kitchen"]["fp_rate_vs_reference"] == 0.0
+
+
+def test_grounding_stats_does_not_score_targets_without_a_tag():
+    # `fireplace` is not among the evaluable slugs -> detections are not judged either way.
+    rows = [{"image_id": 1, "detections": {"fireplace": [{"bbox": [0, 0, 1, 1]}]}}]
+    g = metrics.grounding_stats(rows, GEMINI)
+    assert g["fireplace"]["not_comparable"] == 1
+    assert g["fireplace"]["not_comparable_detected"] == 1
+    assert g["fireplace"]["recall_vs_reference"] is None
+    assert g["fireplace"]["fp_rate_vs_reference"] is None

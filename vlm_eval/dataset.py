@@ -64,6 +64,16 @@ def gemini_tags_by_image(path: Path = DATA / "gemini_tags.jsonl") -> dict[str, d
     return {str(row["image_id"]): row for row in load_jsonl(path)}
 
 
+def property_items(path: Path = DATA / "properties.jsonl") -> list[Item]:
+    """Every image belonging to an exported listing, as downloadable Items (deduplicated)."""
+    out: dict[str, Item] = {}
+    for row in load_jsonl(path):
+        for image_id, url in zip(row["image_ids"], row.get("s3_urls") or []):
+            if url and image_id not in out:
+                out[image_id] = Item(str(image_id), url, url, "property")
+    return list(out.values())
+
+
 def optimize(image_data: bytes, max_dim: int = MAX_DIM, quality: int = JPEG_Q, target_kb: int = TARGET_KB) -> bytes:
     """Same resize/compress as production so every model sees the same pixels the reference model saw."""
     img = PILImage.open(io.BytesIO(image_data))
