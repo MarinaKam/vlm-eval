@@ -62,7 +62,7 @@ stamps the warning into the file.
 uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
 source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
-.venv/bin/pytest                                       # 50 tests including end-to-end
+.venv/bin/pytest                                       # 60 tests including end-to-end
 ```
 
 `.env` holds everything machine-specific. It is gitignored, as are `data/`, `runs/` and `reports/`.
@@ -246,6 +246,28 @@ vlm-eval compare qwen3 qwen2.5      # reports/comparison.md
 Capability and performance tables per model, plus one comparison table. Facts that cannot be measured
 (licence, checkpoint, VRAM, hosting notes, verdict) come from `reports/cards/<model>.json`, which you
 fill in by hand.
+
+**Speed and cost are reported per machine, and never mixed.** A run on a laptop and a price for a cloud
+GPU are numbers from different worlds; multiplying them once produced a figure eight times off in a
+document that looked authoritative. So the card describes each world separately:
+
+```json
+{
+  "measured_on": "Apple M4 Max, Ollama 4-bit",
+  "projection": {
+    "hardware": "NVIDIA L4 (GCP spot)",
+    "images_per_hour": 2000,
+    "usd_per_hour": 0.5832,
+    "source": "published vLLM benchmarks — NOT measured by us"
+  }
+}
+```
+
+The report then shows measured throughput on the machine that produced the quality numbers, and — only
+where a throughput and a price for the *same* machine are both known — a cost. A projection always
+states where its throughput came from. Monthly totals, break-even volumes and fixed costs such as a
+cluster fee stay in `economics.md`, which models always-on versus autoscaled capacity; a single
+cost-per-hour figure cannot.
 
 ---
 
