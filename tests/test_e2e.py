@@ -10,6 +10,7 @@ A second test drives the same chain through the CLI, so the argument wiring is c
 import csv
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -943,3 +944,404 @@ def test_the_backend_surfaces_finish_reason_and_reasoning(monkeypatch):
     assert r.finish_reason == "length"
     assert r.reasoning_chars == len("let me think about this")
     assert r.text == ""
+
+
+def test_the_budget_reported_is_the_budget_sent(tmp_path):
+    """A message that names a budget the request never carried sends you debugging the wrong machine.
+
+    This exact mismatch happened: the error said "cut off at the 4000-token budget" while the request
+    asked for 1000, and the search for the cause went to the inference server instead of here.
+    """
+    import json as _json
+
+    import httpx
+    from PIL import Image as _Image
+
+    from vlm_eval import runner
+    from vlm_eval.backends.openai_compat import OpenAICompatBackend
+
+    sent = {}
+
+    def handler(request):
+        sent.update(_json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "", "reasoning": "x" * 50}, "finish_reason": "length"}],
+                "usage": {"completion_tokens": sent["max_tokens"]},
+            },
+        )
+
+    be = OpenAICompatBackend("http://x/v1", "m", flavor="ollama", transport=httpx.MockTransport(handler))
+    _Image.new("RGB", (8, 8), "white").save(tmp_path / "a.jpg")
+
+    row = runner.run_summary_one(
+        be,
+        {"property_job_id": "p", "image_ids": ["a"], "property_summary": "ref"},
+        "prompt",
+        tmp_path,
+        3000,
+    )
+    assert sent["max_tokens"] == 4000  # base 1000 + the model's extra 3000
+    assert f"{sent['max_tokens']}-token budget" in row["errors"][0]  # and the message says the same
+
+    # The same must hold for tagging and captions, whose budgets are built the same way.
+    import vlm_eval.dataset as _dataset
+
+    original_images = _dataset.IMAGES
+    _dataset.IMAGES = tmp_path
+    cfg = runner.RunConfig(model="m", chunk_size=15, individual=[], extra_output_tokens=500)
+    item = runner.Item("a", "u", "u", "indoor")
+    tags = [{"slug": "pool", "question_text": "Pool?", "category": "common", "order": 0}]
+    row = runner.run_tagging_one(be, item, tags, cfg)
+    assert sent["max_tokens"] == 3500 and "3500-token budget" in row["errors"][0]
+
+    row = runner.run_captions_one(be, item, {"base_caption": "short"}, cfg)
+    assert f"{sent['max_tokens']}-token budget" in row["errors"][0]
+    _dataset.IMAGES = original_images
+
+
+def test_resume_refuses_to_mix_results_from_different_settings(tmp_path, capsys):
+    """`(image_id, repeat)` says the work was done, not that it is still valid. Raise a token budget and
+    every old row still counts as done — two experiments end up in one file and average into one number."""
+    from vlm_eval import provenance
+
+    run_file = tmp_path / "tagging_chunk15.jsonl"
+    before = provenance.RunFingerprint(
+        task="tagging", served_name="qwen3-vl:8b", chunk_size=15, extra_output_tokens=0, prompt_digest="aaa"
+    )
+    provenance.check(run_file, before)  # first run: records what produced it
+    run_file.write_text('{"image_id": "a"}\n')
+    recorded = provenance.load(run_file)
+    assert recorded.fingerprint == before and recorded.status == provenance.VERIFIED
+
+    provenance.check(run_file, before)  # same settings: resumes silently
+    assert "" == capsys.readouterr().out
+
+    after = provenance.RunFingerprint(
+        task="tagging", served_name="qwen3-vl:8b", chunk_size=15, extra_output_tokens=3000, prompt_digest="aaa"
+    )
+    with pytest.raises(SystemExit) as e:
+        provenance.check(run_file, after)
+    message = str(e.value)
+    assert "extra_output_tokens: was 0, now 3000" in message  # names what changed
+    assert "mix two experiments" in message and "archive it" in message
+
+    # A reworded question counts too — the answers mean something different.
+    reworded = provenance.RunFingerprint(
+        task="tagging", served_name="qwen3-vl:8b", chunk_size=15, extra_output_tokens=0, prompt_digest="bbb"
+    )
+    with pytest.raises(SystemExit) as e:
+        provenance.check(run_file, reworded)
+    assert "prompt_digest" in str(e.value)
+
+
+def test_a_file_from_before_fingerprinting_says_so_rather_than_guessing(tmp_path, capsys):
+    from vlm_eval import provenance
+
+    run_file = tmp_path / "old.jsonl"
+    run_file.write_text('{"image_id": "a"}\n')  # rows, no sidecar
+    fp = provenance.RunFingerprint(task="tagging", served_name="m", chunk_size=15)
+    provenance.check(run_file, fp)
+    out = capsys.readouterr().out
+    assert "before runs recorded their settings" in out and "legacy_unknown" in out
+
+    # The current settings are recorded, but the file is NOT promoted to verified: rows written under
+    # unknown settings must not become indistinguishable from checked ones.
+    recorded = provenance.load(run_file)
+    assert recorded.fingerprint == fp
+    assert recorded.status == provenance.LEGACY and recorded.unverified_rows == 1
+
+    # ...and the label sticks — a second, matching run does not launder it into a clean measurement.
+    provenance.check(run_file, fp)
+    assert "legacy_unknown" in capsys.readouterr().out
+    assert provenance.load(run_file).status == provenance.LEGACY
+
+    # It travels into the metrics, where a report is built from it.
+    described = provenance.describe(run_file)
+    assert described["status"] == provenance.LEGACY and "not verified" in described["note"]
+
+
+def test_an_unfinished_answer_contributes_nothing(tmp_path):
+    """Parsing what arrived would let a half-written JSON put real tags into accuracy and recall, and
+    the tags it happened to reach are not a sample of anything."""
+    from vlm_eval import metrics, runner
+    from vlm_eval.backends.base import Response
+
+    class Truncating:
+        def chat(self, *a, **k):
+            # valid JSON as far as it goes, but the model was cut off
+            return Response(text='{"pool": true}', latency_s=0.1, finish_reason="length", reasoning_chars=900)
+
+    from PIL import Image as _Image
+
+    import vlm_eval.dataset as _dataset
+
+    _Image.new("RGB", (8, 8), "white").save(tmp_path / "a.jpg")
+    original, _dataset.IMAGES = _dataset.IMAGES, tmp_path
+    try:
+        cfg = runner.RunConfig(model="m", chunk_size=15, individual=[])
+        tags = [{"slug": "pool", "question_text": "Pool?", "category": "common", "order": 0}]
+        row = runner.run_tagging_one(Truncating(), runner.Item("a", "u", "u", "indoor"), tags, cfg)
+    finally:
+        _dataset.IMAGES = original
+
+    assert row["answers"] == {"pool": None}  # not True, even though the text parsed
+    assert row["errors"] and "cut off" in row["errors"][0]
+
+    # ...and the loss is reported as its own number, not left inside an error string.
+    t = metrics.truncation([row])
+    assert t["images_affected"] == 1 and t["pct"] == 100.0
+
+
+def test_truncation_is_read_from_a_field_not_from_the_wording_of_an_error():
+    """The metric used to scan error text for "cut off at the". Reword the message and truncation
+    silently reads as zero — the one number whose job is to say the run measured less than it looks."""
+    from vlm_eval import metrics
+
+    reworded = {
+        "image_id": "a",
+        "completion": {"calls": 3, "truncated": 1, "status": "truncated"},
+        "errors": ["ран out of room"],
+    }
+    finished = {"image_id": "b", "completion": {"calls": 3, "truncated": 0, "status": "ok"}, "errors": []}
+    t = metrics.truncation([reworded, finished])
+    assert t["images_affected"] == 1 and t["pct"] == 50.0
+    assert t["rows_without_record"] == 0
+
+    # Rows written before the record existed still count, from the only evidence they carry — and say so.
+    legacy = {"image_id": "c", "errors": ["kitchen_island: answer cut off at the 512-token budget"]}
+    t = metrics.truncation([legacy])
+    assert t["images_affected"] == 1 and t["rows_without_record"] == 1
+    assert "predate the completion record" in t["note"]
+
+
+def test_every_command_that_writes_run_rows_passes_the_provenance_gate():
+    """Florence and PaliGemma wrote their rows straight to disk, so the guard was not a project-wide
+    guarantee, only a property of one code path. This is the seam that keeps drifting: two things that
+    must agree, written in different places."""
+    import ast
+    import inspect
+
+    from vlm_eval import cli
+
+    tree = ast.parse(inspect.getsource(cli))
+    unguarded = []
+    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
+        calls = {
+            f"{ast.unparse(n.func)}"
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        }
+        if "runner.run_over_items" in calls and "provenance.check" not in calls:
+            unguarded.append(fn.name)
+    assert not unguarded, f"writes run rows without a provenance check: {unguarded}"
+
+
+def test_completion_status_distinguishes_failed_from_complete():
+    """An exception leaves no answer just like truncation does; a record that says "ok" beside a
+    non-empty errors list is a small lie a summary table will repeat."""
+    from vlm_eval import runner
+
+    assert runner.completion_record(3, 0)["status"] == "complete"
+    assert runner.completion_record(3, 1)["status"] == "truncated"
+    assert runner.completion_record(3, 0, failed=2)["status"] == "failed"
+    assert runner.completion_record(0, 0)["status"] == "not_called"
+
+
+def test_replacing_an_image_under_the_same_id_changes_the_fingerprint(tmp_path, monkeypatch):
+    """Settings say how images were supposed to be prepared; the digest says what they are. A swapped
+    file under an unchanged id is invisible to settings alone."""
+    from PIL import Image as _Image
+
+    from vlm_eval import dataset
+
+    (tmp_path / "images").mkdir()
+    _Image.new("RGB", (8, 8), "white").save(tmp_path / "images" / "a.jpg")
+    monkeypatch.setattr(dataset, "IMAGES", tmp_path / "images")
+    items = [dataset.Item("a", "u", "u", "indoor")]
+
+    before = dataset.images_digest(items)
+    _Image.new("RGB", (8, 8), "black").save(tmp_path / "images" / "a.jpg")
+    assert dataset.images_digest(items) != before
+
+    # A file that vanished is a different dataset too, not a silent shrink.
+    (tmp_path / "images" / "a.jpg").unlink()
+    assert dataset.images_digest(items) not in (before, dataset.images_digest([]))
+
+
+def test_each_task_fingerprints_the_images_it_actually_reads(workspace):
+    """48 real listing images exist only in properties.jsonl, not the manifest. A manifest-wide digest
+    would never notice one being swapped — the exact images a summary is about would be the only ones
+    nobody was watching. And the converse: swapping an image a task never touches must not block it."""
+    import vlm_eval.cli as cli
+    from vlm_eval import dataset
+    from vlm_eval.runner import RunConfig
+
+    images = workspace["data"] / "images"
+    Image.new("RGB", (32, 32), "blue").save(images / "prop-only.jpg")  # summary-only, not in the manifest
+    (workspace["data"] / "properties.jsonl").write_text(
+        json.dumps({"property_job_id": "p1", "image_ids": ["img-a", "prop-only"], "property_summary": "x"}) + "\n"
+    )
+
+    cfg = RunConfig(model="m", chunk_size=15, individual=[])
+    manifest_items = [it for it in dataset.load_manifest() if it.path.exists()]
+
+    def prints():
+        tagging_fp = cli._fingerprint("tagging", cfg, {}, "m", {"q": 1}, images=manifest_items)
+        summary_fp = cli._fingerprint("summary", cfg, {}, "m", {"p": 1}, images=cli._summary_items())
+        return tagging_fp.digest(), summary_fp.digest()
+
+    tag0, sum0 = prints()
+
+    # 1+2. Replacing a manifest image changes tagging; the summary set contains img-a too, so both move.
+    Image.new("RGB", (32, 32), "red").save(images / "img-a.jpg")
+    tag1, sum1 = prints()
+    assert tag1 != tag0 and sum1 != sum0
+
+    # 3. Replacing the property-only image changes summary and leaves tagging alone.
+    Image.new("RGB", (32, 32), "green").save(images / "prop-only.jpg")
+    tag2, sum2 = prints()
+    assert tag2 == tag1 and sum2 != sum1
+
+    # 4. A property image that vanished is a different summary dataset, not a silent shrink.
+    (images / "prop-only.jpg").unlink()
+    tag3, sum3 = prints()
+    assert tag3 == tag2 and sum3 not in (sum1, sum2)
+
+
+def test_fingerprint_sees_question_selection_not_just_question_texts(workspace):
+    """`digest_of` sorts dict keys, so a bare {slug: text} map missed everything structural: which
+    category a tag sits in, its position in the chunk order, and which images count as indoor. All
+    three change the requests without changing a single question text."""
+    import vlm_eval.cli as cli
+    from vlm_eval import dataset
+    from vlm_eval.runner import RunConfig
+
+    cfg = RunConfig(model="m", chunk_size=15, individual=[])
+    items = [it for it in dataset.load_manifest() if it.path.exists()]
+    tags = [dict(t) for t in TAGS]
+
+    def print_of(tags_, items_):
+        return cli._fingerprint("tagging", cfg, {}, "m", cli._tagging_identity(tags_, items_)).digest()
+
+    base = print_of(tags, items)
+
+    moved = [dict(t) for t in tags]
+    moved[0]["category"] = "outdoor" if moved[0]["category"] != "outdoor" else "indoor"
+    assert print_of(moved, items) != base  # a recategorised tag is asked of different images
+
+    reordered = [dict(t) for t in tags]
+    reordered[0]["order"] = 99
+    assert print_of(reordered, items) != base  # chunk composition follows `order`
+
+    retyped = [replace(items[0], image_type="outdoor" if items[0].image_type != "outdoor" else "indoor")] + items[1:]
+    assert print_of(tags, retyped) != base  # same pixels, different question set
+
+
+def test_fingerprint_sees_listing_grouping_and_order(workspace):
+    """The byte digest cannot tell a regrouping or a reshuffle that reuses the same files — but the
+    model is shown the images per listing, in order, so both are different experiments."""
+    import vlm_eval.cli as cli
+    from vlm_eval.runner import RunConfig
+
+    cfg = RunConfig(model="m", chunk_size=15, individual=[])
+    props_file = workspace["data"] / "properties.jsonl"
+
+    def print_of(props):
+        props_file.write_text("".join(json.dumps(p) + "\n" for p in props))
+        listings = [[str(p["property_job_id"]), [str(i) for i in p["image_ids"]]] for p in props]
+        return cli._fingerprint(
+            "summary", cfg, {}, "m", {"rendered": "x", "listings": listings}, images=cli._summary_items()
+        ).digest()
+
+    base = print_of([{"property_job_id": "p1", "image_ids": ["img-a", "img-b"], "property_summary": "s"}])
+    shuffled = print_of([{"property_job_id": "p1", "image_ids": ["img-b", "img-a"], "property_summary": "s"}])
+    regrouped = print_of(
+        [
+            {"property_job_id": "p1", "image_ids": ["img-a"], "property_summary": "s"},
+            {"property_job_id": "p2", "image_ids": ["img-b"], "property_summary": "s"},
+        ]
+    )
+    assert len({base, shuffled, regrouped}) == 3  # same bytes on disk in all three
+
+
+def test_a_missing_image_among_the_first_twenty_fails_rather_than_sliding(tmp_path):
+    """Filtering before capping let image 21 fill a hole among the first 20: the count came out right,
+    nothing failed, and the model saw a different listing than production would send."""
+    from PIL import Image as _Image
+
+    from vlm_eval import runner
+    from vlm_eval.tasks import summary
+
+    ids = [f"i{n:02d}" for n in range(summary.MAX_IMAGES + 1)]  # 21 ids, i05 missing from disk
+    for i in ids:
+        if i != "i05":
+            _Image.new("RGB", (8, 8), "white").save(tmp_path / f"{i}.jpg")
+
+    class Explode:
+        def chat(self, *a, **k):
+            raise AssertionError("must not reach the model")
+
+    row = runner.run_summary_one(Explode(), {"property_job_id": "p", "image_ids": ids}, "prompt", tmp_path)
+    assert row["summary"] is None and row["errors"]  # failed, did not quietly borrow image 21
+    assert row["n_images"] == summary.MAX_IMAGES - 1 and row["n_expected"] == summary.MAX_IMAGES
+    assert row["image_ids"] == ids[: summary.MAX_IMAGES]
+
+
+def test_resume_with_identical_settings_appends_nothing_and_keeps_the_sidecar(workspace):
+    """The positive half of the guarantee: same code, same route, same settings — the second run is a
+    no-op that leaves both the rows and the recorded provenance byte-identical."""
+    import vlm_eval.cli as cli
+    from vlm_eval import provenance, runner
+
+    be = StubBackend({"pool"})
+    cfg = runner.RunConfig(model="stub", chunk_size=15, individual=[])
+    cli.run_task(be, task="tagging", model="stub", cfg=cfg)
+
+    out = runner.tagging_out("stub", 15)
+    rows_before = out.read_text()
+    meta_before = provenance.sidecar(out).read_text()
+    assert provenance.load(out).status == provenance.VERIFIED
+
+    cli.run_task(be, task="tagging", model="stub", cfg=cfg)  # must resume, not refuse and not redo
+    assert out.read_text() == rows_before
+    assert provenance.sidecar(out).read_text() == meta_before
+
+
+def test_resume_refuses_a_different_server_route_or_implementation(tmp_path):
+    """Two servers answering to one served name, or an edited parser, are different experiments even
+    when every setting the CLI knows about is identical."""
+    from vlm_eval import provenance
+
+    run_file = tmp_path / "tagging_chunk15.jsonl"
+    base = dict(task="tagging", served_name="qwen3", chunk_size=15, prompt_digest="x")
+    provenance.check(run_file, provenance.RunFingerprint(**base, route="ollama@http://127.0.0.1:11434/v1", code="aaa"))
+    run_file.write_text('{"image_id": "a"}\n')
+
+    moved = provenance.RunFingerprint(**base, route="vllm@http://10.0.0.5:8000/v1", code="aaa")
+    with pytest.raises(SystemExit) as e:
+        provenance.check(run_file, moved)
+    assert "route" in str(e.value) and "vllm@http://10.0.0.5:8000/v1" in str(e.value)
+
+    edited = provenance.RunFingerprint(**base, route="ollama@http://127.0.0.1:11434/v1", code="bbb")
+    with pytest.raises(SystemExit) as e:
+        provenance.check(run_file, edited)
+    assert "code" in str(e.value)
+
+
+def test_code_identity_tracks_the_answer_producing_source(tmp_path):
+    """Editing the code that builds requests or parses answers changes the identity; the digest is of
+    file bytes, so it holds across processes rather than only within one."""
+    import types
+
+    from vlm_eval import provenance
+
+    f = tmp_path / "mod.py"
+    f.write_text("def parse(x): return x\n")
+    mod = types.SimpleNamespace(__name__="mod", __file__=str(f))
+    before = provenance.code_identity([mod])
+    assert before == provenance.code_identity([mod])  # stable while the file is unchanged
+
+    f.write_text("def parse(x): return x.lower()\n")
+    assert provenance.code_identity([mod]) != before

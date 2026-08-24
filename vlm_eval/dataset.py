@@ -1,6 +1,7 @@
 """Dataset access: manifest, reference-model (Gemini) outputs, tag questions, prompts, images on disk."""
 
 import csv
+import hashlib
 import io
 import json
 from dataclasses import dataclass
@@ -43,6 +44,28 @@ def load_manifest(path: Path | None = None) -> list[Item]:
         )
     with path.open() as fh:
         return [Item(str(r["image_id"]), r["url"], r["s3_url"], r["image_type"]) for r in csv.DictReader(fh)]
+
+
+def images_digest(items: list[Item] | None = None) -> str:
+    """One digest over the actual bytes of every manifest image on disk.
+
+    Encoding *settings* in a fingerprint say how the images were supposed to be prepared; this says
+    what they actually are. Re-download at a different quality, or replace one file under the same
+    id, and the digest changes — settings alone would not notice the second case. Reading ~170 MB
+    takes well under a second, which is cheaper than ever wondering.
+
+    Missing files are folded in by name: a run over 900 of 1000 images is a different dataset than a
+    run over all of them.
+    """
+    items = items if items is not None else load_manifest()
+    agg = hashlib.sha256()
+    for it in sorted(items, key=lambda x: x.image_id):
+        agg.update(it.image_id.encode())
+        if it.path.exists():
+            agg.update(hashlib.sha256(it.path.read_bytes()).digest())
+        else:
+            agg.update(b"missing")
+    return agg.hexdigest()[:16]
 
 
 def load_tags(path: Path | None = None, *, active_only: bool = True) -> list[dict]:

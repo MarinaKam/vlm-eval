@@ -208,6 +208,46 @@ still leaves every capability measured; only the sample size shrinks. It finishe
 
 **Interrupting is safe.** Results are appended row by row; re-running continues where it stopped.
 
+**Resuming under different settings is refused, not merged.** `(image_id, repeat)` only proves the
+work was *done*, never that it is still *valid*: raise a token budget and every old row still counts as
+finished, the new rows land beside them, and one file quietly holds two experiments that average into a
+single number. So each run file carries a sidecar recording everything that changes what an answer
+means:
+
+- **the request as actually rendered** — prompt text *and* JSON schema, so rewording the wrapper around
+  unchanged questions counts as a different run;
+- **the pixels the task actually reads** — a per-task digest of the image bytes, so replacing a
+  listing-only image blocks the summary resume and leaves tagging resumable;
+- **the structure** — tag categories and ordering (they decide chunk composition), each image's
+  indoor/outdoor type (it decides the question set), which images belong to which listing in which
+  order. Identical bytes and identical texts cannot vouch for any of these;
+- **the machinery** — model, checkpoint, backend, batch size, token budget, logprobs, image encoding
+  settings; the server route (`flavor@base_url` — two servers answering to one served name are two
+  experiments); a digest of the answer-producing source (the runner, the task module, the backend —
+  deliberately not a git SHA, so editing a report cannot refuse a resume but editing a parser must);
+  for throughput runs, also the hardware and concurrency, without which the number is meaningless.
+
+Change any of it and the next run stops and names what changed; archive the file or pick another run
+name. Every backend goes through the same gate — a served model, Florence-2, PaliGemma, a throughput
+run — and a test walks the CLI's syntax tree to prove no path writes rows around it.
+
+A file that existed before any of this was recorded is a third case, and stamping it with today's
+settings would be the worst answer: its rows would look exactly as checked as rows that really were.
+Instead it is labelled `legacy_unknown` permanently, with the count of unverified rows. The label prints
+on every run that touches the file, travels into `metrics.json`, and appears in the report — publishing
+it as a clean measurement stays a decision somebody makes on purpose, with the label in front of them.
+
+**An answer the model did not finish counts as no answer.** A response with `finish_reason: "length"` —
+common with reasoning models, which can spend the whole budget thinking and return nothing — records
+unknown rather than parsing what arrived, for tags, captions, bounding boxes and summaries alike. The
+tempting alternative is worse than it looks: a half-written JSON contributes real tags to accuracy, and
+a truncated "found nothing" quietly agrees with the reference without ever seeing the image.
+
+Each row carries a `completion` record (`calls`, `truncated`, `failed`) with a status of `complete` /
+`truncated` / `failed` / `not_called` — an exception is not success. Metrics read that field, never the
+wording of an error message, and report the share affected per task, so a run that measured less than
+it looks says so itself.
+
 ---
 
 ## Part 3 — Turn runs into an answer
@@ -485,6 +525,7 @@ this table says plainly which is which. Verify a row yourself before trusting a 
 | OpenAI-compatible server via **Ollama** | run end to end, all four tasks | — |
 | **Florence-2** via transformers | run end to end (captions, grounding, tagging) | — |
 | Metrics, review, reports, economics | run on real data; every published figure re-derived independently | `python scripts/verify_published_figures.py` |
+| Provenance gate + completion records | unit/e2e tested; **no full sweep has run through them yet** | start any run twice, second must say `already done`; change `extra_output_tokens`, it must refuse |
 | Dataset export | run against one Django schema only | on another schema it is a template — see "Bring your own dataset" |
 | **vLLM** server | **not run** — mocked in tests only | needs an NVIDIA GPU; see below |
 | **InternVL** via transformers | **not run** — routing tested, backend not executed | `vlm-eval hf internvl captions --limit 2` (~17 GB download on first run) |

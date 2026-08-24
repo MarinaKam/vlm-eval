@@ -90,6 +90,15 @@ because "47" read as a number of photos.
 
 This is an evaluation tool; a wrong number is worse than no number.
 
+- **Every code path that writes run rows goes through `provenance.check()`.** No exceptions for "small"
+  backends — a test walks the CLI's syntax tree and fails on any `run_over_items` call without a check.
+- **The fingerprint's composition is frozen while runs are in flight.** Adding a field changes every
+  digest and refuses every resume, so batch such changes between sweeps, never during one.
+- **Truncation and failure are read from the `completion` record**, never by matching error-message
+  text. If a new task variant writes rows, it writes `completion_record(...)` too.
+- **`legacy_unknown` is permanent.** Nothing may promote a pre-provenance file to verified; if a clean
+  measurement is needed, the file is archived and recomputed.
+
 - Every figure in a report traces back to a file in `runs/` or `data/`. If it was computed ad hoc, it
   belongs in the code instead — that is why `vlm-eval economics` exists.
 - Compare like with like. Scoring a model against tags the reference never judged manufactures false

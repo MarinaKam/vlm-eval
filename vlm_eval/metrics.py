@@ -61,8 +61,47 @@ def tagging_agreement(rows: list[dict], gemini: dict[int, dict], *, repeat: int 
     return {
         "n_images": n_images,
         "composition": composition(rows, repeat=repeat),
+        "truncation": truncation(rows, repeat=repeat),
         "overall": derived(tot),
         "per_tag": {slug: derived(c) for slug, c in sorted(per_tag.items())},
+    }
+
+
+def was_truncated(row: dict) -> bool:
+    """Did the model run out of budget on this row.
+
+    Prefers the `completion` record written by the runner. Rows produced before that record existed
+    are read from their error text — the only evidence they carry — and counted separately, because a
+    row with no record and no phrase is not proof the model finished, only that nothing was written
+    down.
+    """
+    record = row.get("completion")
+    if isinstance(record, dict):
+        return bool(record.get("truncated"))
+    return any("cut off at the" in e for e in (row.get("errors") or []))
+
+
+def truncation(rows: list[dict], *, repeat: int = 0) -> dict[str, Any]:
+    """How much of the run the model never got to finish.
+
+    A truncated call contributes no answers — they are recorded as unknown — so this does not distort
+    accuracy. It does bound how much the run actually measured, which belongs next to the result rather
+    than in an error string nobody reads.
+    """
+    considered = [r for r in rows if r.get("repeat", 0) == repeat]
+    cut = [r for r in considered if was_truncated(r)]
+    unrecorded = [r for r in considered if not isinstance(r.get("completion"), dict)]
+    note = "answers from truncated calls are recorded as unknown, never parsed" if cut else ""
+    if unrecorded:
+        note = (note + "; " if note else "") + (
+            f"{len(unrecorded)} row(s) predate the completion record — read from their error text, "
+            "which is weaker evidence"
+        )
+    return {
+        "images_affected": len(cut),
+        "pct": _pct(len(cut), len(considered)),
+        "rows_without_record": len(unrecorded),
+        "note": note,
     }
 
 
@@ -154,6 +193,7 @@ def caption_stats(rows: list[dict]) -> dict[str, Any]:
         "n_images": len(rows),
         "empty_pct": _pct(empty, total),
         "mean_words": {k: round(statistics.mean(v), 1) for k, v in per_key.items() if v},
+        "truncation": truncation(rows),
         "errors": sum(1 for r in rows if r.get("errors")),
     }
 
