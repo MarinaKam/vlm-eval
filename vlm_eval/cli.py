@@ -26,7 +26,7 @@ import json
 import sys
 import time
 
-from . import dataset, metrics, pipeline_config, report, review, runner
+from . import dataset, metrics, pipeline_config, preconditions, report, review, runner
 from .backends.openai_compat import OpenAICompatBackend
 from .config import REPORTS
 from .tasks import captions, grounding, summary
@@ -79,6 +79,7 @@ def cmd_download(a) -> None:
 
 def cmd_run(a) -> None:
     _resolve(a)
+    preconditions.need_dataset(dataset.DATA)
     be = _backend(a)
     prompts = dataset.load_prompts()
     pipe = pipeline_config.load(prompts)
@@ -186,6 +187,7 @@ def _primary_tagging_run(model: str):
 
 def cmd_metrics(a) -> None:
     _resolve(a)
+    preconditions.need_run(runner.RUNS, a.model)
     gem = dataset.gemini_tags_by_image()
     d = runner.RUNS / a.model
     out: dict = {"model": a.model, "tagging": {}, "captions": {}, "grounding": {}, "summary": {}, "perf": {}}
@@ -307,6 +309,8 @@ def cmd_florence(a) -> None:
 
 def cmd_review(a) -> None:
     _resolve(a)
+    preconditions.need_run(runner.RUNS, a.model)
+    preconditions.need_reference(dataset.DATA)
     gem = dataset.gemini_tags_by_image()
     rows = dataset.load_jsonl(_primary_tagging_run(a.model))
     if a.decisions:
@@ -631,6 +635,8 @@ def cmd_cost(a) -> None:
     if not command:
         sys.exit("VLM_EVAL_COST_COMMAND is not set (see .env.example) — name your app's cost command there")
 
+    if not (dataset.DATA / "manifest.csv").exists():
+        preconditions.fail("No dataset, so there are no image URLs to measure.", "vlm-eval export")
     urls = dataset.DATA / f"cost_urls_{a.type}.txt"
     if not urls.exists() or a.refresh:
         _script("make_cost_urls.py", "--type", a.type, "--limit", str(a.images))
@@ -742,7 +748,18 @@ def _card(model: str) -> dict:
 
 def cmd_report(a) -> None:
     _resolve(a)
-    m = json.loads((runner.RUNS / a.model / "metrics.json").read_text())
+    metrics_path = preconditions.need_metrics(runner.RUNS, a.model)
+    preconditions.warn_if_stale(
+        metrics_path, sorted((runner.RUNS / a.model).glob("*.jsonl")), f"vlm-eval metrics {a.model}"
+    )
+    card_path = REPORTS / "cards" / f"{a.model}.json"
+    if not card_path.exists():
+        print(
+            f"NOTE: no {card_path.relative_to(dataset.ROOT)} — licence, checkpoint, VRAM and the verdict "
+            "will be blank.\n      Create it to fill the model table.",
+            flush=True,
+        )
+    m = json.loads(metrics_path.read_text())
     REPORTS.mkdir(parents=True, exist_ok=True)
     out = REPORTS / f"{a.model}.md"
     out.write_text(report.render_model(_card(a.model), m))
@@ -751,6 +768,9 @@ def cmd_report(a) -> None:
 
 def cmd_compare(a) -> None:
     a.models = [_presets().get(m, {}).get("run_name", m) for m in a.models]
+    for model in a.models:
+        path = preconditions.need_metrics(runner.RUNS, model)
+        preconditions.warn_if_stale(path, sorted((runner.RUNS / model).glob("*.jsonl")), f"vlm-eval metrics {model}")
     cards = [_card(m) for m in a.models]
     ms = [json.loads((runner.RUNS / m / "metrics.json").read_text()) for m in a.models]
     out = REPORTS / "comparison.md"

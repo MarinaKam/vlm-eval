@@ -612,3 +612,58 @@ def test_economics_refuses_placeholder_inputs(tmp_path, monkeypatch, capsys):
     # Overridden knowingly: it renders, but the file says so on the first line.
     cli.main(["economics", "--allow-unmeasured"])
     assert (reports / "economics.md").read_text().startswith("> **UNMEASURED INPUTS")
+
+
+def test_commands_say_what_to_run_instead_of_raising(tmp_path, monkeypatch):
+    """Running a step too early must name the command that produces what is missing."""
+    from vlm_eval import cli, preconditions
+
+    empty = tmp_path / "data"
+    empty.mkdir()
+    runs = tmp_path / "runs"
+    monkeypatch.setattr("vlm_eval.dataset.DATA", empty)
+    monkeypatch.setattr("vlm_eval.runner.RUNS", runs)
+
+    with pytest.raises(SystemExit) as e:
+        preconditions.need_dataset(empty)
+    assert "vlm-eval export" in str(e.value)
+
+    (empty / "manifest.csv").write_text("image_id\n")
+    with pytest.raises(SystemExit) as e:
+        preconditions.need_dataset(empty)
+    assert "vlm-eval download" in str(e.value)  # manifest exists, images do not
+
+    with pytest.raises(SystemExit) as e:
+        preconditions.need_run(runs, "somemodel")
+    assert "vlm-eval run somemodel tagging" in str(e.value)
+
+    with pytest.raises(SystemExit) as e:
+        preconditions.need_metrics(runs, "somemodel")
+    assert "vlm-eval metrics somemodel" in str(e.value)
+
+    with pytest.raises(SystemExit) as e:
+        cli.main(["report", "somemodel"])
+    assert "vlm-eval metrics" in str(e.value)
+
+
+def test_stale_results_are_reported_not_silently_used(tmp_path, capsys):
+    """Deriving from an out-of-date file looks like success — say so, but do not overrule the user."""
+    import os
+    import time
+
+    from vlm_eval import preconditions
+
+    source = tmp_path / "run.jsonl"
+    target = tmp_path / "metrics.json"
+    target.write_text("{}")
+    source.write_text("{}")
+    os.utime(source, (time.time() + 10, time.time() + 10))  # source is newer
+
+    assert preconditions.stale(target, [source]) == ["run.jsonl"]
+    assert preconditions.warn_if_stale(target, [source], "vlm-eval metrics m") is True
+    out = capsys.readouterr().out
+    assert "older than run.jsonl" in out and "vlm-eval metrics m" in out
+
+    # The other way round: nothing to report.
+    os.utime(source, (time.time() - 10, time.time() - 10))
+    assert preconditions.warn_if_stale(target, [source], "x") is False
