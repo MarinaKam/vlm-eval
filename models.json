@@ -1,5 +1,5 @@
 {
-  "_comment": "Model presets so commands stay short: `vlm-eval run qwen3 tagging`. `run_name` is the folder under runs/ and the name used in reports; the rest is how to reach the model.",
+  "_comment": "Model presets so commands stay short: `vlm-eval run qwen3 tagging`. `run_name` is the folder under runs/ and the name used in reports; the rest says how to reach the model. `via` may be server (default, any OpenAI-compatible API) or florence/internvl/paligemma (transformers, add `checkpoint`). Your own models go in models.local.json \u2014 same format, gitignored, and it wins over this file. VLM_EVAL_MODELS points at a third file if you keep presets elsewhere.",
   "qwen3": {
     "run_name": "qwen3-vl-8b-ollama",
     "served_name": "qwen3-vl:8b",

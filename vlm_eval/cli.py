@@ -31,13 +31,15 @@ from .backends.openai_compat import OpenAICompatBackend
 from .config import REPORTS
 from .tasks import captions, grounding, summary
 
-PRESETS_FILE = dataset.ROOT / "models.json"
-
 
 def _presets() -> dict:
-    if not PRESETS_FILE.exists():
-        return {}
-    return {k: v for k, v in json.loads(PRESETS_FILE.read_text()).items() if not k.startswith("_")}
+    """Every known model, later files overriding earlier ones (see config.model_presets)."""
+    from .config import model_presets
+
+    merged: dict[str, dict] = {}
+    for f in model_presets():
+        merged.update({k: v for k, v in json.loads(f.read_text()).items() if not k.startswith("_")})
+    return merged
 
 
 def _resolve(a) -> None:
@@ -49,9 +51,15 @@ def _resolve(a) -> None:
         ("base_url", "http://localhost:8000/v1"),
         ("flavor", "vllm"),
         ("coords", "norm1000"),
+        # A preset can also say how the model is reached at all, so `sweep <name>` works for a
+        # transformers-backed checkpoint without repeating --via and --checkpoint every time.
+        ("via", "server"),
+        ("checkpoint", None),
     ):
-        if getattr(a, field, None) is None:
-            setattr(a, field, preset.get(field, default))
+        if getattr(a, field, None) in (None, "server") and field in preset:
+            setattr(a, field, preset[field])
+        elif getattr(a, field, None) is None:
+            setattr(a, field, default)
 
 
 def _backend(a) -> OpenAICompatBackend:
@@ -444,6 +452,7 @@ def cmd_sweep(a) -> None:
 
     # Models without a server (Florence-2, InternVL, PaliGemma) go through their own commands, and
     # not all of them do every task: Florence-2 has no multi-image input, PaliGemma is single-turn.
+    _resolve(a)
     if a.via != "server":
         _sweep_local(a)
         return
