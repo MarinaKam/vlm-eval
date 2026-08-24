@@ -23,11 +23,37 @@ SOURCE = source_repo()
 if len(sys.argv) < 2:
     raise SystemExit(__doc__)
 
-for line in (SOURCE / ".env").read_text().splitlines():
-    line = line.strip()
-    if line and not line.startswith("#") and "=" in line:
-        k, v = line.split("=", 1)
-        os.environ.setdefault(k.replace("export ", "").strip(), v.strip().strip('"').strip("'"))
+
+def _read_env(path: Path) -> dict[str, str]:
+    out = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            out[k.replace("export ", "").strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+# `--env-file <path>` replaces the source repo's .env entirely.
+# `--db-from <path>` keeps the local .env and takes ONLY DATABASE_URL from the other file — the right
+# choice for pointing at another deployment's database: local library paths (GDAL/GEOS) stay intact and
+# none of that deployment's other secrets enter the process.
+env_path, db_from = SOURCE / ".env", None
+for flag in ("--env-file", "--db-from"):
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        target = Path(sys.argv[i + 1]).expanduser().resolve()
+        if flag == "--env-file":
+            env_path = target
+        else:
+            db_from = target
+        del sys.argv[i : i + 2]
+
+for k, v in _read_env(env_path).items():
+    os.environ.setdefault(k, v)
+if db_from:
+    os.environ["DATABASE_URL"] = _read_env(db_from)["DATABASE_URL"]
+    print(f"DATABASE_URL взят из {db_from.name}, остальное окружение локальное", flush=True)
 
 
 # The command runs with cwd=SOURCE, so a relative path typed here would resolve there instead.
