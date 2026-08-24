@@ -55,8 +55,16 @@ def _usage_sum(responses: list[Response]) -> dict[str, int]:
 # ------------------------------------------------------------------ per-image task functions
 
 
+def _read_image(item: Item) -> bytes:
+    """Raises with the image id in the message, so a bad file is identifiable in the run log."""
+    try:
+        return item.path.read_bytes()
+    except OSError as exc:
+        raise OSError(f"cannot read {item.path.name}: {exc}") from exc
+
+
 def run_tagging_one(backend: Backend, item: Item, tags: list[dict], cfg: RunConfig) -> dict[str, Any]:
-    img = item.path.read_bytes()
+    img = _read_image(item)
     questions = tagging.questions_for(item.image_type, tags)
     chunks = tagging.chunk_questions(questions, cfg.chunk_size, cfg.individual)
     answers, confidence, raw, responses, errors = {}, {}, [], [], []
@@ -103,7 +111,7 @@ def run_captions_one(
     cfg: RunConfig,
     templates: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    img = item.path.read_bytes()
+    img = _read_image(item)
     t0 = time.perf_counter()
     try:
         r = backend.chat(
@@ -128,7 +136,12 @@ def run_captions_one(
 
 
 def run_grounding_one(backend: Backend, item: Item, targets: dict[str, str], cfg: RunConfig) -> dict[str, Any]:
-    img = item.path.read_bytes()
+    if not targets:
+        raise ValueError(
+            "no detection targets — grounding would produce empty rows that look like a model finding "
+            "nothing. Populate data/grounding_targets.json."
+        )
+    img = _read_image(item)
     w, h = image_size(img)
     out, raw, errors, lat = {}, {}, [], {}
     for label, desc in targets.items():
@@ -213,11 +226,23 @@ def run_over_items(
     done = _done_keys(out_path)
     todo = [(it, rep) for rep in range(repeats) for it in items if (it.image_id, rep) not in done]
     log(f"{out_path.name}: {len(items)} items x {repeats} repeats, {len(todo)} to do, {len(done)} already done")
-    t_start, n = time.perf_counter(), 0
+    t_start, n, failed = time.perf_counter(), 0, 0
 
     def work(pair):
         it, rep = pair
-        row = fn(it)
+        try:
+            row = fn(it)
+        except Exception as exc:
+            # A corrupt file, a missing image, an unexpected shape in one row: record it and carry on.
+            # Ending a four-hour run because of one bad image loses the run, not the bad image — and the
+            # row below is what tells you afterwards which images were skipped and why.
+            row = {
+                "image_id": it.image_id,
+                "image_type": it.image_type,
+                "answers": {},
+                "errors": [f"{type(exc).__name__}: {exc}"],
+                "latency_s": 0.0,
+            }
         row["repeat"] = rep
         row["model_ts"] = time.time()
         return row
@@ -228,9 +253,12 @@ def run_over_items(
             row = fut.result()
             _append(out_path, row)
             n += 1
+            failed += bool(row.get("errors"))
             if n % 10 == 0 or n == len(todo):
-                el = time.perf_counter() - t_start
+                el = max(time.perf_counter() - t_start, 1e-9)
                 log(f"  {n}/{len(todo)} done, {el:.0f}s elapsed, {n / el * 3600:.0f} items/hour at workers={workers}")
+    if failed:
+        log(f'  {failed} of {n} item(s) recorded an error — grep the run file for "errors" to see which')
     return n
 
 

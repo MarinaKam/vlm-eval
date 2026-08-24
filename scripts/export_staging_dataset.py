@@ -6,8 +6,8 @@ Or run manually from the source repo with DATABASE_URL pointing at the right DB:
 
 Writes to ~/PycharmProjects/vlm-eval/data/:
   manifest.csv          image_id,url,s3_url,image_type,user_id,job_created_at
-  gemini_tags.jsonl     {"image_id", "image_type", "tags": {slug: conf>0}, "evaluable_slugs": [...]}
-  gemini_captions.jsonl {"image_id", "captions": {slug: text}}
+  reference_tags.jsonl  {"image_id", "image_type", "tags": {slug: conf>0}, "evaluable_slugs": [...]}
+  reference_captions.jsonl  {"image_id", "captions": {slug: text}}
   properties.jsonl      {"property_job_id", "image_ids": [...], "property_summary", "architectural_style"}
   tags.json             ALL ClassificationTag rows (slug, name, question_text, category, order, is_active)
   prompts.json          caption Prompt rows + PromptTemplate rows + ProcessingConfig (chunk_size etc.)
@@ -201,7 +201,7 @@ for r in ImageFeature.objects.filter(image_id__in=selected, feature_id__in=class
 ):
     evaluable[r["image_id"]].add(r["feature__slug"])
 
-with (OUT_DIR / "gemini_tags.jsonl").open("w") as fh:
+with (OUT_DIR / "reference_tags.jsonl").open("w") as fh:
     for i in selected:
         fh.write(
             json_dumps(
@@ -222,7 +222,7 @@ caps = defaultdict(dict)
 for r in cap_rows:
     if r["literal_value"]:
         caps[r["image_id"]][r["feature__slug"]] = r["literal_value"]
-with (OUT_DIR / "gemini_captions.jsonl").open("w") as fh:
+with (OUT_DIR / "reference_captions.jsonl").open("w") as fh:
     for i in selected:
         fh.write(json_dumps({"image_id": str(i), "captions": caps.get(i, {})}, ensure_ascii=False) + "\n")
 print(f"captions: {sum(1 for i in selected if caps.get(i))} images have captions")

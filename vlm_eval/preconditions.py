@@ -31,10 +31,12 @@ def need_dataset(data: Path) -> None:
 
 def need_reference(data: Path) -> None:
     """Scoring needs something to score against."""
-    if not (data / "gemini_tags.jsonl").exists():
+    from .dataset import reference_path
+
+    if not reference_path("tags", data).exists():
         fail(
             "No reference answers, so agreement cannot be computed.",
-            "vlm-eval export     (the export captures what your current API answered)",
+            "vlm-eval export     (the export captures what your current pipeline answered)",
         )
 
 

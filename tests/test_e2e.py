@@ -8,6 +8,7 @@ A second test drives the same chain through the CLI, so the argument wiring is c
 """
 
 import csv
+import io
 import json
 from pathlib import Path
 
@@ -266,12 +267,15 @@ def test_economics_report_renders_from_config(tmp_path, monkeypatch, capsys):
     )
     cli.main(["economics"])
     md = (reports / "economics.md").read_text()
-    assert "Break-even for a GPU running non-stop: 608,333" in md
-    assert "4 GPUs at once" in md  # 4000 peak / 1000 per hour
-    assert "| always on | $1.0000 | $8,760/yr |" in md
-    assert "| autoscaled | $1.0000 | $240/yr |" in md
+    assert "level at **608,333 images/month**" in md
+    assert "4 in parallel" in md  # 4000 peak / 1000 per hour
+    assert "| always on | $8,760 |" in md
+    assert "| autoscaled | $240 |" in md
     assert "$0.20/month" in md  # 10 GB of weights in object storage
-    assert "Not yet." in md
+    # The verdict is per alternative now, and it reads the same whichever side you start from.
+    assert "costs an extra $8,472/year" in md  # an always-on GPU at this volume
+    assert "level at **608,333 images/month**" in md  # ...and where that would flip
+    assert "growing into it is not an argument" in md  # autoscaled scales like the API does
 
 
 def test_missing_dataset_fails_with_an_instruction(tmp_path, monkeypatch):
@@ -447,7 +451,9 @@ def test_download_does_not_re_encode_already_processed_images(tmp_path, monkeypa
 
     from vlm_eval import dataset
 
-    original = b"\xff\xd8\xff\xe0 pretend this is a production-optimised jpeg"
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buf, format="JPEG", quality=54)
+    original = buf.getvalue()
     monkeypatch.setattr(dataset, "IMAGES", tmp_path)
 
     def handler(request):
@@ -667,3 +673,144 @@ def test_stale_results_are_reported_not_silently_used(tmp_path, capsys):
     # The other way round: nothing to report.
     os.utime(source, (time.time() - 10, time.time() - 10))
     assert preconditions.warn_if_stale(target, [source], "x") is False
+
+
+def test_download_rejects_a_url_that_does_not_serve_an_image(tmp_path, monkeypatch, capsys):
+    """An expired link or a proxy page answers 200 with HTML. Written as <id>.jpg it looks like a
+    successful download and fails hours later, mid-run."""
+    import httpx
+
+    from vlm_eval import dataset
+
+    monkeypatch.setattr(dataset, "IMAGES", tmp_path)
+
+    def handler(request):
+        return httpx.Response(200, content=b"<html>Access denied</html>", headers={"content-type": "text/html"})
+
+    real = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    done, failed = dataset.download_all([dataset.Item("bad", "http://x/a.jpg", "http://x/a.jpg", "indoor")])
+    assert (done, failed) == (0, ["bad"])
+    assert not (tmp_path / "bad.jpg").exists()  # nothing written
+    out = capsys.readouterr().out
+    assert "not an image" in out and "text/html" in out
+
+
+def test_one_unreadable_image_does_not_end_the_run(tmp_path, monkeypatch):
+    """A four-hour run must not die on a single bad file: record the failure, keep going."""
+    from vlm_eval import dataset, runner
+
+    monkeypatch.setattr(dataset, "IMAGES", tmp_path)
+    monkeypatch.setattr(runner, "RUNS", tmp_path / "runs")
+    Image.new("RGB", (8, 8), "white").save(tmp_path / "good.jpg")
+    items = [dataset.Item("good", "u", "u", "indoor"), dataset.Item("missing", "u", "u", "indoor")]
+
+    cfg = runner.RunConfig(model="m", chunk_size=15, individual=[])
+    be = StubBackend({"pool"})
+    out = tmp_path / "runs" / "out.jsonl"
+    out.parent.mkdir(parents=True)
+    n = runner.run_over_items(
+        items, lambda it: runner.run_tagging_one(be, it, TAGS, cfg), out, repeats=1, workers=1, log=lambda _: None
+    )
+
+    assert n == 2  # both attempted
+    rows = {r["image_id"]: r for r in dataset.load_jsonl(out)}
+    assert rows["good"]["errors"] == []
+    assert "cannot read missing.jpg" in rows["missing"]["errors"][0]  # named, not swallowed
+
+
+def test_grounding_refuses_to_run_with_no_targets(tmp_path, monkeypatch):
+    """Empty targets would write rows with no detections — indistinguishable from a model that found
+    nothing. That is the failure this whole tool exists to prevent."""
+    from vlm_eval import dataset, runner
+
+    monkeypatch.setattr(dataset, "IMAGES", tmp_path)
+    Image.new("RGB", (8, 8), "white").save(tmp_path / "i.jpg")
+    cfg = runner.RunConfig(model="m")
+    with pytest.raises(ValueError) as e:
+        runner.run_grounding_one(StubBackend(set()), dataset.Item("i", "u", "u", "indoor"), {}, cfg)
+    assert "grounding_targets.json" in str(e.value)
+
+
+def test_every_backend_goes_through_the_same_dispatcher(workspace, monkeypatch):
+    """A served model and a transformers checkpoint must ask the same questions with the same settings.
+
+    They used not to: the transformers path was a copy that had drifted — it read an emptied constant
+    for detection targets, skipped the exported caption header, and ignored production's batch size.
+    """
+    import argparse
+
+    from vlm_eval import cli, runner
+
+    captured = {}
+
+    def spy(be, *, task, model, cfg, limit=None, workers=1, repeats=1):
+        captured[model] = {"task": task, "chunk": cfg.chunk_size, "individual": cfg.individual}
+
+    monkeypatch.setattr(cli, "run_task", spy)
+    monkeypatch.setattr(cli, "_backend", lambda a: StubBackend({"pool"}))
+    monkeypatch.setattr(cli, "cmd_metrics", lambda a: None)
+    monkeypatch.setattr(cli, "_presets", dict)
+
+    class FakeInternVL:
+        name = "fake-internvl"
+
+        def __init__(self, *a, **k):
+            pass
+
+    monkeypatch.setattr("vlm_eval.backends.hf_chat.InternVLBackend", FakeInternVL)
+
+    cli.cmd_run(
+        argparse.Namespace(
+            model="served",
+            task="tagging",
+            served_name="x",
+            base_url="http://h/v1",
+            flavor="ollama",
+            coords="abs",
+            chunk=None,
+            repeats=1,
+            workers=1,
+            limit=None,
+            no_logprobs=True,
+        )
+    )
+    cli.cmd_hf(
+        argparse.Namespace(
+            backend="internvl",
+            task="tagging",
+            checkpoint=None,
+            model="local",
+            device=None,
+            chunk=None,
+            repeats=1,
+            limit=None,
+        )
+    )
+
+    # The fixture's export says batch by 2 and ask `garden` on its own; both paths must obey it.
+    assert captured["served"] == captured["local"] == {"task": "tagging", "chunk": 2, "individual": ["garden"]}
+    assert set(captured) == {"served", "local"}
+    # And the dispatcher is the real one, not a per-command copy.
+    assert runner.tagging_out("served", 2).name == "tagging_chunk2.jsonl"
+
+
+def test_reference_file_name_is_vendor_neutral_with_a_fallback(tmp_path, monkeypatch):
+    """The reference is whatever the pipeline runs today; the file should not name a vendor. Datasets
+    exported before the rename must keep working without anyone touching them."""
+    from vlm_eval import dataset
+
+    monkeypatch.setattr(dataset, "DATA", tmp_path)
+
+    old = tmp_path / "gemini_tags.jsonl"
+    old.write_text(json.dumps({"image_id": "a", "tags": {"pool": 0.8}}) + "\n")
+    assert dataset.reference_path("tags").name == "gemini_tags.jsonl"  # legacy dataset still found
+    assert dataset.reference_tags_by_image()["a"]["tags"] == {"pool": 0.8}
+
+    new = tmp_path / "reference_tags.jsonl"
+    new.write_text(json.dumps({"image_id": "a", "tags": {"garden": 0.9}}) + "\n")
+    assert dataset.reference_path("tags").name == "reference_tags.jsonl"  # neutral name wins
+    assert dataset.reference_tags_by_image()["a"]["tags"] == {"garden": 0.9}
+
+    # The old entry point keeps working for anything already calling it.
+    assert dataset.gemini_tags_by_image is dataset.reference_tags_by_image

@@ -65,8 +65,24 @@ def load_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in fh if line.strip()]
 
 
-def gemini_tags_by_image(path: Path | None = None) -> dict[str, dict]:
-    return {str(row["image_id"]): row for row in load_jsonl(path or DATA / "gemini_tags.jsonl")}
+def reference_path(kind: str, data: Path | None = None) -> Path:
+    """Where the reference answers live. `kind` is "tags" or "captions".
+
+    The tool has no opinion about which system is the reference: it is whatever your pipeline runs
+    today — a paid API, a model you already host, last quarter's checkpoint. Early datasets named these
+    files after one vendor; both names are accepted, and the neutral one wins when both exist.
+    """
+    data = data or DATA
+    neutral = data / f"reference_{kind}.jsonl"
+    return neutral if neutral.exists() else data / f"gemini_{kind}.jsonl"
+
+
+def reference_tags_by_image(path: Path | None = None) -> dict[str, dict]:
+    return {str(row["image_id"]): row for row in load_jsonl(path or reference_path("tags"))}
+
+
+# Older name, kept so existing scripts and notebooks keep working.
+gemini_tags_by_image = reference_tags_by_image
 
 
 def property_items(path: Path | None = None) -> list[Item]:
@@ -109,6 +125,20 @@ def image_size(data: bytes) -> tuple[int, int]:
     return PILImage.open(io.BytesIO(data)).size
 
 
+def is_image(data: bytes) -> bool:
+    """Do these bytes decode as an image at all?
+
+    A URL that has expired, a signed link that went stale, or a proxy interstitial all return HTTP 200
+    with an HTML body. Written to disk as `<id>.jpg` that looks like a successful download and fails
+    hours later, mid-run, one image at a time.
+    """
+    try:
+        PILImage.open(io.BytesIO(data)).verify()
+        return True
+    except Exception:
+        return False
+
+
 def download_all(
     items: list[Item],
     *,
@@ -132,11 +162,21 @@ def download_all(
             try:
                 r = client.get(it.s3_url or it.url)
                 r.raise_for_status()
+                if not is_image(r.content):
+                    raise ValueError(
+                        f"served {len(r.content)} bytes that are not an image "
+                        f"(content-type {r.headers.get('content-type', 'unknown')})"
+                    )
                 it.path.write_bytes(optimize(r.content) if reencode else r.content)
                 done += 1
                 if done % 50 == 0:
                     print(f"  downloaded {done}...", flush=True)
-            except (httpx.HTTPError, OSError) as exc:
+            except (httpx.HTTPError, OSError, ValueError) as exc:
                 failed.append(it.image_id)
                 print(f"download failed image_id={it.image_id}: {exc}")
+    if failed:
+        print(
+            f"\n{len(failed)} image(s) could not be fetched and are absent from the dataset. Runs will "
+            "skip them; the counts in every report are over the images that exist."
+        )
     return done, failed

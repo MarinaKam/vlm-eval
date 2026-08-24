@@ -1,3 +1,5 @@
+import pytest
+
 from vlm_eval import metrics
 
 GEMINI = {
@@ -73,40 +75,61 @@ def test_grounding_stats_does_not_score_targets_without_a_tag():
     assert g["fireplace"]["fp_rate_vs_reference"] is None
 
 
-def test_economics_breakeven_and_peak():
-    from vlm_eval.economics import Inputs, break_even_images, monthly_gpu_cost, peak_analysis, render
+def test_options_are_symmetric_and_include_fixed_costs():
+    """Per-image and per-hour options are compared the same way whichever one is in use today, and a
+    fixed monthly charge (a cluster fee, a reserved disk) counts."""
+    from vlm_eval.economics import Inputs, Option, crossover, render
 
-    inp = Inputs(
-        api_cost_per_image=0.001,
-        api_cost_per_image_optimized=0.0005,
-        gpu_usd_per_hour=1.0,
-        gpu_images_per_hour=1000,
-        peak_hour_images=5000,
-        busy_hours_pct=10.0,
-        scenarios=[("small", 10_000), ("big", 100_000)],
+    api = Option(name="API", kind="per_image", price=0.001)
+    autoscaled = Option(name="GPU autoscaled", kind="per_hour", price=1.0, throughput_per_hour=1000)
+    always = Option(name="GPU always on", kind="per_hour", price=1.0, throughput_per_hour=1000, always_on=True)
+    cluster = Option(
+        name="GKE pod",
+        kind="per_hour",
+        price=1.0,
+        throughput_per_hour=2000,  # cheaper per image than `api`, but carries a monthly fee
+        fixed_monthly=73.0,
+        fixed_note="cluster fee",
     )
-    # 10k images at 1000/h = 10 GPU-hours at $1
-    assert monthly_gpu_cost(10_000, inp) == 10.0
-    # a GPU that never sleeps costs 730 -> break-even at 730/0.001
-    assert break_even_images(inp) == 730_000
-    # never charge more than running non-stop
-    assert monthly_gpu_cost(10_000_000, inp) == 730.0
 
-    peak = peak_analysis(inp)
-    assert peak["hours_for_one_gpu"] == 5.0
-    assert peak["gpus_to_absorb_in_one_hour"] == 5
+    assert api.monthly_cost(10_000) == 10.0  # 10k * $0.001
+    assert autoscaled.monthly_cost(10_000) == 10.0  # 10 GPU-hours at $1
+    assert always.monthly_cost(10_000) == 730.0  # time, not volume
+    assert always.monthly_cost(10) == 730.0
+    assert cluster.monthly_cost(10_000) == 78.0  # 5 GPU-hours at 2000/h + the fixed fee
 
-    md = render(inp, currency_note="test note")
-    assert "Break-even for a GPU running non-stop: 730,000" in md
-    assert "5 GPUs at once" in md
-    assert "Not yet." in md  # 100k/month is below break-even
-    assert "test note" in md
+    # Same billing basis -> no crossover; the ratio just holds.
+    assert crossover(api, Option(name="B", kind="per_image", price=0.002)) is None
+    # Per-image vs autoscaled: both scale with volume, so growing into it changes nothing.
+    assert crossover(api, autoscaled) is None
+    # Per-image vs always-on: they meet where the fixed monthly cost is covered.
+    assert crossover(api, always) == 730_000
+    # A fixed monthly fee creates a crossover even for an autoscaled option: below it the fee dominates.
+    assert crossover(api, cluster) == 146_000
+    # Parallel lines (same effective per-image rate, different fixed cost) never meet.
+    parallel = Option(name="same rate", kind="per_hour", price=1.0, throughput_per_hour=1000, fixed_monthly=73.0)
+    assert crossover(api, parallel) is None
+
+    # Direction does not change the arithmetic, only the wording.
+    from_api = render(Inputs(options=[api, always], current="API", scenarios=[("now", 100_000)]))
+    from_gpu = render(Inputs(options=[api, always], current="GPU always on", scenarios=[("now", 100_000)]))
+    assert "Today: **API**" in from_api and "Today: **GPU always on**" in from_gpu
+    assert "costs an extra $7,560/year" in from_api  # always-on is dearer at 100k
+    assert "saves $7,560/year" in from_gpu  # ...which is the same fact, reversed
 
 
-def test_economics_verdict_flips_past_break_even():
-    from vlm_eval.economics import Inputs, render
+def test_a_per_hour_option_without_throughput_is_refused():
+    """Without it there is no way to turn a volume into hours, so any cost would be invented."""
+    from vlm_eval.economics import Option
 
-    inp = Inputs(
-        api_cost_per_image=0.01, gpu_usd_per_hour=1.0, gpu_images_per_hour=1000, scenarios=[("huge", 1_000_000)]
-    )
-    assert "Worth building." in render(inp)
+    with pytest.raises(ValueError) as e:
+        Option(name="mystery GPU", kind="per_hour", price=1.0)
+    assert "throughput_per_hour" in str(e.value)
+
+
+def test_current_option_must_exist():
+    from vlm_eval.economics import Inputs, Option
+
+    with pytest.raises(ValueError) as e:
+        Inputs(options=[Option(name="A", kind="per_image", price=1.0)], current="B")
+    assert "not one of the options" in str(e.value)
