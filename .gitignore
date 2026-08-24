@@ -12,3 +12,5 @@ data/
 # Run outputs and rendered reports: derived from private data — never commit
 runs/
 reports/
+
+.idea/
