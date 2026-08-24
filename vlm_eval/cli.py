@@ -1,5 +1,6 @@
 """vlm-eval CLI. Models are named by preset (see models.json), so commands stay short:
 
+  vlm-eval status                       what is measured so far, what is missing
   vlm-eval download                     fetch the images named in the manifest
   vlm-eval run qwen3 tagging            run a task  (also: captions | grounding | summary)
   vlm-eval run qwen3 tagging --chunk 0  every question in one call
@@ -409,6 +410,61 @@ def cmd_volume(a) -> None:
     sys.exit(_script("run_source_manage.py", *args))
 
 
+def cmd_status(a) -> None:
+    """What has been measured so far, and what is missing — so the answer never needs `wc -l`."""
+    import csv
+
+    data, runs = dataset.DATA, runner.RUNS
+    print(f"data: {data}")
+    manifest = data / "manifest.csv"
+    if manifest.exists():
+        items = dataset.load_manifest()
+        on_disk = sum(1 for it in items if it.path.exists())
+        kinds: dict[str, int] = {}
+        for it in items:
+            kinds[it.image_type] = kinds.get(it.image_type, 0) + 1
+        print(f"  manifest        {len(items):>6} images ({', '.join(f'{k} {v}' for k, v in sorted(kinds.items()))})")
+        print(f"  downloaded      {on_disk:>6}" + ("" if on_disk == len(items) else "   <- run `vlm-eval download`"))
+    else:
+        print("  manifest        missing   <- run `vlm-eval export`, then `vlm-eval download`")
+
+    for name, label in (("tags.json", "tag questions"), ("prompts.json", "prompts")):
+        f = data / name
+        n = len(json.loads(f.read_text())) if f.exists() else 0
+        print(f"  {label:<15} {n:>6}" if f.exists() else f"  {label:<15} missing")
+    for name, label in (
+        ("gemini_tags.jsonl", "reference tags"),
+        ("gemini_captions.jsonl", "reference captions"),
+        ("properties.jsonl", "listings"),
+    ):
+        f = data / name
+        print(f"  {label:<15} {len(dataset.load_jsonl(f)):>6}" if f.exists() else f"  {label:<15} missing")
+    labels = data / "manual_labels.json"
+    if labels.exists():
+        print(f"  {'human verdicts':<15} {len(json.loads(labels.read_text())):>6}")
+
+    cost = sorted(data.glob("cost_chunk*.csv"))
+    if cost:
+        print("\ncost measurements:")
+        for f in cost:
+            with f.open() as fh:
+                rows = list(csv.DictReader(fh))
+            chunk = f.stem.replace("cost_chunk", "")
+            print(f"  {chunk:>4} questions/call  {len(rows):>4} images")
+
+    print(f"\nruns: {runs}")
+    if runs.exists():
+        for model_dir in sorted(p for p in runs.iterdir() if p.is_dir()):
+            parts = [f"{f.stem} {len(dataset.load_jsonl(f))}" for f in sorted(model_dir.glob("*.jsonl"))]
+            has_metrics = " +metrics" if (model_dir / "metrics.json").exists() else ""
+            print(f"  {model_dir.name}: {', '.join(parts) if parts else 'empty'}{has_metrics}")
+    else:
+        print("  none yet")
+
+    econ = data / "economics.json"
+    print(f"\neconomics config: {'present' if econ.exists() else 'missing (see `vlm-eval economics`)'}")
+
+
 def _read_cost_csv(path):
     """(tags per image, mean cost, mean calls, mean prompt tokens) from a cost-measurement CSV."""
     import csv
@@ -618,6 +674,9 @@ def main(argv=None) -> None:
     s = sub.add_parser("compare", help="render the comparison table")
     s.add_argument("models", nargs="+")
     s.set_defaults(fn=cmd_compare)
+
+    s = sub.add_parser("status", help="what is measured so far and what is missing")
+    s.set_defaults(fn=cmd_status)
 
     s = sub.add_parser("export", help="build the dataset from the source app's database")
     s.set_defaults(fn=cmd_export)
