@@ -26,7 +26,7 @@ Every step writes plain files, and every step can be interrupted and resumed.
 ## 0. Setup (once)
 
 ```bash
-uv venv --python 3.12 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
+uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
 source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
 .venv/bin/pytest                                       # 40 tests including end-to-end
@@ -61,6 +61,7 @@ minimal manifest from a folder of JPEGs.
 
 ```bash
 vlm-eval download
+vlm-eval status      # what is measured so far, what is still missing
 ```
 
 **Why:** models are fed local files, resized and compressed exactly the way production does it, so every
