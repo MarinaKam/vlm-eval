@@ -77,6 +77,27 @@ def cmd_download(a) -> None:
     print(f"downloaded {done}, failed {len(failed)}, total {len(items)}; failed ids: {failed[:20]}")
 
 
+# What each backend can actually do, declared once. `sweep` iterates it and the commands validate
+# against it, so the two cannot drift — a copy of this list is how a task silently went missing before.
+BACKEND_TASKS = {
+    "server": ["summary", "grounding", "captions", "tagging"],
+    # Florence-2 takes one image per forward pass, so there is no multi-image summary.
+    "florence": ["captions", "grounding", "tagging"],
+    "internvl": ["summary", "grounding", "captions", "tagging"],
+    # PaliGemma is single-image and single-turn: one question per call, no summary.
+    "paligemma": ["captions", "tagging"],
+}
+
+
+def _check_task(backend: str, task: str) -> None:
+    allowed = BACKEND_TASKS[backend]
+    if task not in allowed:
+        sys.exit(
+            f"{backend} does not support '{task}' — it can do: {', '.join(allowed)}.\n"
+            "This is an architectural limit, not a missing feature."
+        )
+
+
 def _read_bytes(item):
     """Same failure message as the shared path, so a bad file reads the same in every run file."""
     return runner._read_image(item)
@@ -268,6 +289,7 @@ def cmd_florence(a) -> None:
     from .backends.florence_hf import FlorenceBackend
     from .tasks import tagging
 
+    _check_task("florence", a.task)
     be = FlorenceBackend(a.checkpoint, device=a.device)
     model = a.model or be.name
     items = [it for it in dataset.load_manifest() if it.path.exists()]
@@ -355,6 +377,8 @@ def cmd_hf(a) -> None:
     if a.backend == "internvl":
         from .backends.hf_chat import InternVLBackend
 
+        _check_task("internvl", a.task)
+
         be = InternVLBackend(a.checkpoint or "OpenGVLab/InternVL3_5-8B-HF", device=a.device)
         model = a.model or be.name
         a.model = model
@@ -363,6 +387,8 @@ def cmd_hf(a) -> None:
     else:
         from .backends.hf_chat import PaliGemmaBackend
         from .tasks import tagging
+
+        _check_task("paligemma", a.task)
 
         be = PaliGemmaBackend(a.checkpoint or "google/paligemma2-3b-mix-448", device=a.device)
         model = a.model or be.name
@@ -414,11 +440,8 @@ def cmd_hf(a) -> None:
                 }
 
             runner.run_over_items(items, fn, runner.captions_out(model), repeats=1, workers=1, limit=a.limit)
-        else:
-            sys.exit(
-                "PaliGemma is single-image and single-turn: it supports tagging and captions. "
-                "For grounding use its 'detect' prompt directly; there is no multi-image summary."
-            )
+        else:  # pragma: no cover - _check_task rejects anything else before we get here
+            sys.exit(f"unhandled task for paligemma: {a.task}")
 
     cmd_metrics(argparse.Namespace(model=model))
 
@@ -495,8 +518,9 @@ def _sweep_local(a) -> None:
     """Full run for a transformers-backed model, skipping the tasks its architecture cannot do."""
     import argparse as _argparse
 
+    limits = {"summary": None, "grounding": a.grounding, "captions": a.captions, "tagging": a.tagging}
     if a.via == "florence":
-        supported = [("captions", a.captions), ("grounding", a.grounding), ("tagging", a.tagging)]
+        supported = [(t, limits[t]) for t in BACKEND_TASKS["florence"]]
         run = cmd_florence
         base = {
             "checkpoint": a.checkpoint or "florence-community/Florence-2-large",
@@ -506,12 +530,12 @@ def _sweep_local(a) -> None:
         }
         note = "Florence-2 takes one image at a time, so there is no property summary."
     else:
-        supported = [("captions", a.captions), ("tagging", a.tagging)]
-        if a.via == "internvl":
-            supported = [("summary", None), ("grounding", a.grounding), *supported]
-            note = ""
-        else:
-            note = "PaliGemma is single-image and single-turn: no summary, and one call per tag."
+        supported = [(t, limits[t]) for t in BACKEND_TASKS[a.via]]
+        note = (
+            ""
+            if a.via == "internvl"
+            else "PaliGemma is single-image and single-turn: no summary, and one call per tag."
+        )
         run = cmd_hf
         base = {
             "backend": a.via,
@@ -745,6 +769,20 @@ def cmd_economics(a) -> None:
     print(f"wrote {out}" + (f"\nWARNING: {warning}" if warning else ""))
 
 
+def _economics_options() -> list:
+    """The priced options, if the economics config exists — so a card can reference one by name."""
+    path = dataset.DATA / "economics.json"
+    if not path.exists():
+        return []
+    from .economics import from_config
+
+    try:
+        inputs, _ = from_config(json.loads(path.read_text()))
+    except (ValueError, KeyError, TypeError):
+        return []
+    return inputs.options
+
+
 def _card(model: str) -> dict:
     p = REPORTS / "cards" / f"{model}.json"
     return json.loads(p.read_text()) if p.exists() else {"model": model, "name": model}
@@ -764,9 +802,10 @@ def cmd_report(a) -> None:
             flush=True,
         )
     m = json.loads(metrics_path.read_text())
+    options = _economics_options()
     REPORTS.mkdir(parents=True, exist_ok=True)
     out = REPORTS / f"{a.model}.md"
-    out.write_text(report.render_model(_card(a.model), m))
+    out.write_text(report.render_model(_card(a.model), m, options=options))
     print(f"wrote {out}")
 
 

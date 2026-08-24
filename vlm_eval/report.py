@@ -58,7 +58,30 @@ def _world(
     return lines
 
 
-def render_model(card: dict, m: dict) -> str:
+def resolve_projection(card: dict, options: list | None = None) -> dict:
+    """A card may name an option from the economics config instead of repeating its numbers.
+
+    Two copies of a price are two chances to disagree, and a stale copy in a per-model report is
+    exactly how a cost figure ends up eight times off in a document somebody forwards.
+    """
+    proj = dict(card.get("projection") or {})
+    ref = proj.pop("option", None)
+    if not ref:
+        return proj
+    match = next((o for o in (options or []) if o.name == ref), None)
+    if match is None:
+        known = ", ".join(o.name for o in (options or [])) or "none loaded"
+        raise SystemExit(
+            f"card projection references the option {ref!r}, which is not in the economics config (known: {known})"
+        )
+    proj.setdefault("hardware", match.name)
+    proj.setdefault("usd_per_hour", match.price)
+    proj.setdefault("images_per_hour", match.throughput_per_hour)
+    proj.setdefault("source", f"from economics.json option {ref!r}")
+    return proj
+
+
+def render_model(card: dict, m: dict, *, options: list | None = None) -> str:
     tag = m.get("tagging", {})
     over = tag.get("agreement", {}).get("overall", {})
     perf = m.get("perf", {})
@@ -72,7 +95,7 @@ def render_model(card: dict, m: dict) -> str:
     # Two worlds, never multiplied together: what this run actually did, and what the hardware you
     # would deploy on is projected to do. A projection is only shown when the card supplies both its
     # throughput and its price, and it always says where the throughput came from.
-    projection = card.get("projection") or {}
+    projection = resolve_projection(card, options)
     cap_rows = [
         [
             "Image tagging (boolean VQA, Gemini prompts)",

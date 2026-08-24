@@ -814,3 +814,84 @@ def test_reference_file_name_is_vendor_neutral_with_a_fallback(tmp_path, monkeyp
 
     # The old entry point keeps working for anything already calling it.
     assert dataset.gemini_tags_by_image is dataset.reference_tags_by_image
+
+
+def test_backend_capabilities_are_declared_once():
+    """`sweep` and the per-backend commands must agree on what each architecture can do. When they were
+    two lists, one of them was free to go stale — the same shape of bug as the copied dispatcher."""
+    import argparse
+
+    from vlm_eval import cli
+
+    for backend, tasks in cli.BACKEND_TASKS.items():
+        if backend == "server":
+            continue
+        for task in tasks:
+            cli._check_task(backend, task)  # every declared task is accepted
+
+    with pytest.raises(SystemExit) as e:
+        cli._check_task("paligemma", "summary")  # and anything else is refused, with the reason
+    assert "architectural limit" in str(e.value)
+
+    # sweep walks exactly the declared tasks, in the declared order
+    seen = []
+    import vlm_eval.cli as c
+
+    def fake(a):
+        seen.append(a.task)
+
+    original_florence, original_hf, original_metrics = c.cmd_florence, c.cmd_hf, c.cmd_metrics
+    c.cmd_florence = fake
+    c.cmd_hf = fake
+    c.cmd_metrics = lambda a: None
+    try:
+        c.cmd_sweep(
+            argparse.Namespace(
+                model="florence",
+                served_name=None,
+                base_url=None,
+                flavor=None,
+                coords=None,
+                tagging=5,
+                captions=5,
+                grounding=5,
+                chunk_all=0,
+                consistency=0,
+                workers=1,
+                no_logprobs=True,
+                via="florence",
+                checkpoint=None,
+                device=None,
+            )
+        )
+    finally:
+        c.cmd_florence, c.cmd_hf, c.cmd_metrics = original_florence, original_hf, original_metrics
+    assert seen == cli.BACKEND_TASKS["florence"]
+
+
+def test_a_card_may_reference_a_priced_option_instead_of_copying_it(tmp_path):
+    """Two copies of a price are two chances to disagree; a stale copy is how a cost figure ends up
+    eight times off in a document somebody forwards."""
+    from vlm_eval import report
+    from vlm_eval.economics import Option
+
+    options = [Option(name="L4 spot", kind="per_hour", price=0.58, throughput_per_hour=2000)]
+    card = {"projection": {"option": "L4 spot", "note": "verify on real hardware"}}
+
+    resolved = report.resolve_projection(card, options)
+    assert resolved["usd_per_hour"] == 0.58 and resolved["images_per_hour"] == 2000
+    assert "economics.json" in resolved["source"]  # says where the numbers came from
+    assert resolved["note"] == "verify on real hardware"
+
+    md = report.render_model({"name": "M", **card}, {}, options=options)
+    assert "**Projected for deployment** — L4 spot" in md
+    assert "0.29 USD" in md  # 0.58 / 2000 * 1000, both numbers from the same option
+
+    # A name that does not exist must fail loudly, not silently drop the projection.
+    with pytest.raises(SystemExit) as e:
+        report.resolve_projection({"projection": {"option": "typo"}}, options)
+    assert "not in the economics config" in str(e.value)
+
+    # Inline numbers still work for a card used without any economics config.
+    inline = {"projection": {"hardware": "T4", "images_per_hour": 500, "usd_per_hour": 0.5}}
+    assert report.resolve_projection(inline, [])["hardware"] == "T4"
