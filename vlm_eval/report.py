@@ -33,19 +33,69 @@ def monthly_cost(
     return round(hours * gpu_usd_per_hour, 2)
 
 
-def render_model(card: dict, m: dict) -> str:
+def _world(
+    label: str, hardware: str | None, iph: float | None, usd_per_hour: float | None, *, source: str = "", note: str = ""
+) -> list[str]:
+    """One coherent set of numbers: a machine, its throughput, and — only if both are known — its cost."""
+    if not hardware and not iph:
+        return []
+    lines = [f"**{label}**" + (f" — {hardware}" if hardware else ""), ""]
+    rows = [["Throughput", f"{_v(iph)} images/hour" + (f" ({source})" if source else "")]]
+    if usd_per_hour is not None:
+        rows.append(["Price of that machine", f"${usd_per_hour:.4f}/hour"])
+        rows.append(["Cost per 1 000 images", _v(cost_per_1k(iph, usd_per_hour), " USD")])
+    else:
+        rows.append(
+            [
+                "Cost",
+                "not derived — no hourly price for this machine, and a price from a *different* "
+                "machine would not describe anything",
+            ]
+        )
+    lines.append(_table(["Metric", "Value"], rows))
+    if note:
+        lines += ["", note]
+    return lines
+
+
+def resolve_projection(card: dict, options: list | None = None) -> dict:
+    """A card may name an option from the economics config instead of repeating its numbers.
+
+    Two copies of a price are two chances to disagree, and a stale copy in a per-model report is
+    exactly how a cost figure ends up eight times off in a document somebody forwards.
+    """
+    proj = dict(card.get("projection") or {})
+    ref = proj.pop("option", None)
+    if not ref:
+        return proj
+    match = next((o for o in (options or []) if o.name == ref), None)
+    if match is None:
+        known = ", ".join(o.name for o in (options or [])) or "none loaded"
+        raise SystemExit(
+            f"card projection references the option {ref!r}, which is not in the economics config (known: {known})"
+        )
+    proj.setdefault("hardware", match.name)
+    proj.setdefault("usd_per_hour", match.price)
+    proj.setdefault("images_per_hour", match.throughput_per_hour)
+    proj.setdefault("source", f"from economics.json option {ref!r}")
+    return proj
+
+
+def render_model(card: dict, m: dict, *, options: list | None = None) -> str:
     tag = m.get("tagging", {})
     over = tag.get("agreement", {}).get("overall", {})
     perf = m.get("perf", {})
     cons = tag.get("consistency", {})
     iph = perf.get("images_per_hour_measured") or tag.get("latency", {}).get("images_per_hour_serial")
-    price = card.get("gpu_usd_per_hour")
-    c1k = cost_per_1k(iph, price)
     iph_note = (
         f"measured at concurrency {perf.get('concurrency')}"
         if perf.get("images_per_hour_measured")
-        else "derived, serial"
+        else "derived from serial latency"
     )
+    # Two worlds, never multiplied together: what this run actually did, and what the hardware you
+    # would deploy on is projected to do. A projection is only shown when the card supplies both its
+    # throughput and its price, and it always says where the throughput came from.
+    projection = resolve_projection(card, options)
     cap_rows = [
         [
             "Image tagging (boolean VQA, Gemini prompts)",
@@ -73,14 +123,9 @@ def render_model(card: dict, m: dict) -> str:
             _v(tag.get("latency", {}).get("mean_s"), " s mean")
             + f", p95 {_v(tag.get('latency', {}).get('p95_s'), ' s')}",
         ],
-        ["Images / hour", f"{_v(iph)} ({iph_note})"],
-        ["Est. hosting cost / 1K images", _v(c1k, " USD") + f" @ {_v(price, ' USD/h')}"],
-        ["Est. hosting cost / 10K images / month", _v(monthly_cost(10_000, iph, price), " USD")],
-        ["Est. hosting cost / 100K images / month", _v(monthly_cost(100_000, iph, price), " USD")],
-        ["Est. hosting cost / 1M images / month", _v(monthly_cost(1_000_000, iph, price), " USD")],
-        ["Tagging agreement w/ Gemini (accuracy)", _v(over.get("accuracy"), "%")],
-        ["Tagging false-positive rate vs Gemini", _v(over.get("fpr"), "%")],
-        ["Tagging recall vs Gemini", _v(over.get("recall"), "%")],
+        ["Tagging agreement with the reference", _v(over.get("accuracy"), "%")],
+        ["Tagging false-positive rate", _v(over.get("fpr"), "%")],
+        ["Tagging recall", _v(over.get("recall"), "%")],
         ["Unparsed answers", _v(over.get("unparsed_rate"), "%")],
         [
             "Consistency (3 repeats): identical / mean Jaccard",
@@ -107,6 +152,30 @@ def render_model(card: dict, m: dict) -> str:
         "",
         "## Performance results",
         _table(["Metric", "Result"], perf_rows),
+        "",
+        "### Speed and cost, by machine",
+        "",
+        *_world(
+            "Measured on this run",
+            card.get("measured_on"),
+            iph,
+            card.get("measured_usd_per_hour"),
+            source=iph_note,
+            note=card.get("measured_note", ""),
+        ),
+        "",
+        *_world(
+            "Projected for deployment",
+            projection.get("hardware"),
+            projection.get("images_per_hour"),
+            projection.get("usd_per_hour"),
+            source=projection.get("source", "projection, not measured here"),
+            note=projection.get("note", ""),
+        ),
+        "",
+        "Monthly totals, break-even volumes and fixed costs such as a cluster fee live in "
+        "`economics.md` — that report models always-on versus autoscaled capacity, which a single "
+        "cost-per-hour figure cannot.",
         "",
         "## Hosting requirements",
         card.get("hosting_md", "_TBD_"),

@@ -8,6 +8,7 @@ A second test drives the same chain through the CLI, so the argument wiring is c
 """
 
 import csv
+import io
 import json
 from pathlib import Path
 
@@ -250,7 +251,7 @@ def test_economics_report_renders_from_config(tmp_path, monkeypatch, capsys):
     (data / "economics.json").write_text(
         json.dumps(
             {
-                "api_cost_per_image": 0.001,
+                "api_cost_per_image": 0.0012,
                 "gpu_usd_per_hour": 1.0,
                 "gpu_images_per_hour": 1000,
                 "peak_hour_images": 4000,
@@ -266,12 +267,15 @@ def test_economics_report_renders_from_config(tmp_path, monkeypatch, capsys):
     )
     cli.main(["economics"])
     md = (reports / "economics.md").read_text()
-    assert "Break-even for a GPU running non-stop: 730,000" in md
-    assert "4 GPUs at once" in md  # 4000 peak / 1000 per hour
-    assert "| always on | $1.0000 | $8,760/yr |" in md
-    assert "| autoscaled | $1.0000 | $240/yr |" in md
+    assert "level at **608,333 images/month**" in md
+    assert "4 in parallel" in md  # 4000 peak / 1000 per hour
+    assert "| always on | $8,760 |" in md
+    assert "| autoscaled | $240 |" in md
     assert "$0.20/month" in md  # 10 GB of weights in object storage
-    assert "Not yet." in md
+    # The verdict is per alternative now, and it reads the same whichever side you start from.
+    assert "costs an extra $8,472/year" in md  # an always-on GPU at this volume
+    assert "level at **608,333 images/month**" in md  # ...and where that would flip
+    assert "growing into it is not an argument" in md  # autoscaled scales like the API does
 
 
 def test_missing_dataset_fails_with_an_instruction(tmp_path, monkeypatch):
@@ -447,7 +451,9 @@ def test_download_does_not_re_encode_already_processed_images(tmp_path, monkeypa
 
     from vlm_eval import dataset
 
-    original = b"\xff\xd8\xff\xe0 pretend this is a production-optimised jpeg"
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), "white").save(buf, format="JPEG", quality=54)
+    original = buf.getvalue()
     monkeypatch.setattr(dataset, "IMAGES", tmp_path)
 
     def handler(request):
@@ -591,3 +597,301 @@ def test_unknown_model_name_is_used_as_is(monkeypatch):
     )
     cli._resolve(a)
     assert a.model == "whatever" and a.served_name == "x:7b" and a.coords == "norm1000"
+
+
+def test_economics_refuses_placeholder_inputs(tmp_path, monkeypatch, capsys):
+    """A confident report built on example numbers is worse than no report."""
+    from vlm_eval import cli
+
+    data, reports = tmp_path / "data", tmp_path / "reports"
+    data.mkdir()
+    monkeypatch.setattr("vlm_eval.dataset.DATA", data)
+    monkeypatch.setattr(cli, "REPORTS", reports)
+    (data / "economics.json").write_text(json.dumps({"api_cost_per_image": 0.001}))
+
+    with pytest.raises(SystemExit) as e:
+        cli.main(["economics"])
+    message = str(e.value)
+    assert "vlm-eval volume" in message and "vlm-eval cost" in message  # says how to fix each one
+    assert not (reports / "economics.md").exists()
+
+    # Overridden knowingly: it renders, but the file says so on the first line.
+    cli.main(["economics", "--allow-unmeasured"])
+    assert (reports / "economics.md").read_text().startswith("> **UNMEASURED INPUTS")
+
+
+def test_commands_say_what_to_run_instead_of_raising(tmp_path, monkeypatch):
+    """Running a step too early must name the command that produces what is missing."""
+    from vlm_eval import cli, preconditions
+
+    empty = tmp_path / "data"
+    empty.mkdir()
+    runs = tmp_path / "runs"
+    monkeypatch.setattr("vlm_eval.dataset.DATA", empty)
+    monkeypatch.setattr("vlm_eval.runner.RUNS", runs)
+
+    with pytest.raises(SystemExit) as e:
+        preconditions.need_dataset(empty)
+    assert "vlm-eval export" in str(e.value)
+
+    (empty / "manifest.csv").write_text("image_id\n")
+    with pytest.raises(SystemExit) as e:
+        preconditions.need_dataset(empty)
+    assert "vlm-eval download" in str(e.value)  # manifest exists, images do not
+
+    with pytest.raises(SystemExit) as e:
+        preconditions.need_run(runs, "somemodel")
+    assert "vlm-eval run somemodel tagging" in str(e.value)
+
+    with pytest.raises(SystemExit) as e:
+        preconditions.need_metrics(runs, "somemodel")
+    assert "vlm-eval metrics somemodel" in str(e.value)
+
+    with pytest.raises(SystemExit) as e:
+        cli.main(["report", "somemodel"])
+    assert "vlm-eval metrics" in str(e.value)
+
+
+def test_stale_results_are_reported_not_silently_used(tmp_path, capsys):
+    """Deriving from an out-of-date file looks like success — say so, but do not overrule the user."""
+    import os
+    import time
+
+    from vlm_eval import preconditions
+
+    source = tmp_path / "run.jsonl"
+    target = tmp_path / "metrics.json"
+    target.write_text("{}")
+    source.write_text("{}")
+    os.utime(source, (time.time() + 10, time.time() + 10))  # source is newer
+
+    assert preconditions.stale(target, [source]) == ["run.jsonl"]
+    assert preconditions.warn_if_stale(target, [source], "vlm-eval metrics m") is True
+    out = capsys.readouterr().out
+    assert "older than run.jsonl" in out and "vlm-eval metrics m" in out
+
+    # The other way round: nothing to report.
+    os.utime(source, (time.time() - 10, time.time() - 10))
+    assert preconditions.warn_if_stale(target, [source], "x") is False
+
+
+def test_download_rejects_a_url_that_does_not_serve_an_image(tmp_path, monkeypatch, capsys):
+    """An expired link or a proxy page answers 200 with HTML. Written as <id>.jpg it looks like a
+    successful download and fails hours later, mid-run."""
+    import httpx
+
+    from vlm_eval import dataset
+
+    monkeypatch.setattr(dataset, "IMAGES", tmp_path)
+
+    def handler(request):
+        return httpx.Response(200, content=b"<html>Access denied</html>", headers={"content-type": "text/html"})
+
+    real = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    done, failed = dataset.download_all([dataset.Item("bad", "http://x/a.jpg", "http://x/a.jpg", "indoor")])
+    assert (done, failed) == (0, ["bad"])
+    assert not (tmp_path / "bad.jpg").exists()  # nothing written
+    out = capsys.readouterr().out
+    assert "not an image" in out and "text/html" in out
+
+
+def test_one_unreadable_image_does_not_end_the_run(tmp_path, monkeypatch):
+    """A four-hour run must not die on a single bad file: record the failure, keep going."""
+    from vlm_eval import dataset, runner
+
+    monkeypatch.setattr(dataset, "IMAGES", tmp_path)
+    monkeypatch.setattr(runner, "RUNS", tmp_path / "runs")
+    Image.new("RGB", (8, 8), "white").save(tmp_path / "good.jpg")
+    items = [dataset.Item("good", "u", "u", "indoor"), dataset.Item("missing", "u", "u", "indoor")]
+
+    cfg = runner.RunConfig(model="m", chunk_size=15, individual=[])
+    be = StubBackend({"pool"})
+    out = tmp_path / "runs" / "out.jsonl"
+    out.parent.mkdir(parents=True)
+    n = runner.run_over_items(
+        items, lambda it: runner.run_tagging_one(be, it, TAGS, cfg), out, repeats=1, workers=1, log=lambda _: None
+    )
+
+    assert n == 2  # both attempted
+    rows = {r["image_id"]: r for r in dataset.load_jsonl(out)}
+    assert rows["good"]["errors"] == []
+    assert "cannot read missing.jpg" in rows["missing"]["errors"][0]  # named, not swallowed
+
+
+def test_grounding_refuses_to_run_with_no_targets(tmp_path, monkeypatch):
+    """Empty targets would write rows with no detections — indistinguishable from a model that found
+    nothing. That is the failure this whole tool exists to prevent."""
+    from vlm_eval import dataset, runner
+
+    monkeypatch.setattr(dataset, "IMAGES", tmp_path)
+    Image.new("RGB", (8, 8), "white").save(tmp_path / "i.jpg")
+    cfg = runner.RunConfig(model="m")
+    with pytest.raises(ValueError) as e:
+        runner.run_grounding_one(StubBackend(set()), dataset.Item("i", "u", "u", "indoor"), {}, cfg)
+    assert "grounding_targets.json" in str(e.value)
+
+
+def test_every_backend_goes_through_the_same_dispatcher(workspace, monkeypatch):
+    """A served model and a transformers checkpoint must ask the same questions with the same settings.
+
+    They used not to: the transformers path was a copy that had drifted — it read an emptied constant
+    for detection targets, skipped the exported caption header, and ignored production's batch size.
+    """
+    import argparse
+
+    from vlm_eval import cli, runner
+
+    captured = {}
+
+    def spy(be, *, task, model, cfg, limit=None, workers=1, repeats=1):
+        captured[model] = {"task": task, "chunk": cfg.chunk_size, "individual": cfg.individual}
+
+    monkeypatch.setattr(cli, "run_task", spy)
+    monkeypatch.setattr(cli, "_backend", lambda a: StubBackend({"pool"}))
+    monkeypatch.setattr(cli, "cmd_metrics", lambda a: None)
+    monkeypatch.setattr(cli, "_presets", dict)
+
+    class FakeInternVL:
+        name = "fake-internvl"
+
+        def __init__(self, *a, **k):
+            pass
+
+    monkeypatch.setattr("vlm_eval.backends.hf_chat.InternVLBackend", FakeInternVL)
+
+    cli.cmd_run(
+        argparse.Namespace(
+            model="served",
+            task="tagging",
+            served_name="x",
+            base_url="http://h/v1",
+            flavor="ollama",
+            coords="abs",
+            chunk=None,
+            repeats=1,
+            workers=1,
+            limit=None,
+            no_logprobs=True,
+        )
+    )
+    cli.cmd_hf(
+        argparse.Namespace(
+            backend="internvl",
+            task="tagging",
+            checkpoint=None,
+            model="local",
+            device=None,
+            chunk=None,
+            repeats=1,
+            limit=None,
+        )
+    )
+
+    # The fixture's export says batch by 2 and ask `garden` on its own; both paths must obey it.
+    assert captured["served"] == captured["local"] == {"task": "tagging", "chunk": 2, "individual": ["garden"]}
+    assert set(captured) == {"served", "local"}
+    # And the dispatcher is the real one, not a per-command copy.
+    assert runner.tagging_out("served", 2).name == "tagging_chunk2.jsonl"
+
+
+def test_reference_file_name_is_vendor_neutral_with_a_fallback(tmp_path, monkeypatch):
+    """The reference is whatever the pipeline runs today; the file should not name a vendor. Datasets
+    exported before the rename must keep working without anyone touching them."""
+    from vlm_eval import dataset
+
+    monkeypatch.setattr(dataset, "DATA", tmp_path)
+
+    old = tmp_path / "gemini_tags.jsonl"
+    old.write_text(json.dumps({"image_id": "a", "tags": {"pool": 0.8}}) + "\n")
+    assert dataset.reference_path("tags").name == "gemini_tags.jsonl"  # legacy dataset still found
+    assert dataset.reference_tags_by_image()["a"]["tags"] == {"pool": 0.8}
+
+    new = tmp_path / "reference_tags.jsonl"
+    new.write_text(json.dumps({"image_id": "a", "tags": {"garden": 0.9}}) + "\n")
+    assert dataset.reference_path("tags").name == "reference_tags.jsonl"  # neutral name wins
+    assert dataset.reference_tags_by_image()["a"]["tags"] == {"garden": 0.9}
+
+    # The old entry point keeps working for anything already calling it.
+    assert dataset.gemini_tags_by_image is dataset.reference_tags_by_image
+
+
+def test_backend_capabilities_are_declared_once():
+    """`sweep` and the per-backend commands must agree on what each architecture can do. When they were
+    two lists, one of them was free to go stale — the same shape of bug as the copied dispatcher."""
+    import argparse
+
+    from vlm_eval import cli
+
+    for backend, tasks in cli.BACKEND_TASKS.items():
+        if backend == "server":
+            continue
+        for task in tasks:
+            cli._check_task(backend, task)  # every declared task is accepted
+
+    with pytest.raises(SystemExit) as e:
+        cli._check_task("paligemma", "summary")  # and anything else is refused, with the reason
+    assert "architectural limit" in str(e.value)
+
+    # sweep walks exactly the declared tasks, in the declared order
+    seen = []
+    import vlm_eval.cli as c
+
+    def fake(a):
+        seen.append(a.task)
+
+    original_florence, original_hf, original_metrics = c.cmd_florence, c.cmd_hf, c.cmd_metrics
+    c.cmd_florence = fake
+    c.cmd_hf = fake
+    c.cmd_metrics = lambda a: None
+    try:
+        c.cmd_sweep(
+            argparse.Namespace(
+                model="florence",
+                served_name=None,
+                base_url=None,
+                flavor=None,
+                coords=None,
+                tagging=5,
+                captions=5,
+                grounding=5,
+                chunk_all=0,
+                consistency=0,
+                workers=1,
+                no_logprobs=True,
+                via="florence",
+                checkpoint=None,
+                device=None,
+            )
+        )
+    finally:
+        c.cmd_florence, c.cmd_hf, c.cmd_metrics = original_florence, original_hf, original_metrics
+    assert seen == cli.BACKEND_TASKS["florence"]
+
+
+def test_a_card_may_reference_a_priced_option_instead_of_copying_it(tmp_path):
+    """Two copies of a price are two chances to disagree; a stale copy is how a cost figure ends up
+    eight times off in a document somebody forwards."""
+    from vlm_eval import report
+    from vlm_eval.economics import Option
+
+    options = [Option(name="L4 spot", kind="per_hour", price=0.58, throughput_per_hour=2000)]
+    card = {"projection": {"option": "L4 spot", "note": "verify on real hardware"}}
+
+    resolved = report.resolve_projection(card, options)
+    assert resolved["usd_per_hour"] == 0.58 and resolved["images_per_hour"] == 2000
+    assert "economics.json" in resolved["source"]  # says where the numbers came from
+    assert resolved["note"] == "verify on real hardware"
+
+    md = report.render_model({"name": "M", **card}, {}, options=options)
+    assert "**Projected for deployment** — L4 spot" in md
+    assert "0.29 USD" in md  # 0.58 / 2000 * 1000, both numbers from the same option
+
+    # A name that does not exist must fail loudly, not silently drop the projection.
+    with pytest.raises(SystemExit) as e:
+        report.resolve_projection({"projection": {"option": "typo"}}, options)
+    assert "not in the economics config" in str(e.value)
+
+    # Inline numbers still work for a card used without any economics config.
+    inline = {"projection": {"hardware": "T4", "images_per_hour": 500, "usd_per_hour": 0.5}}
+    assert report.resolve_projection(inline, [])["hardware"] == "T4"

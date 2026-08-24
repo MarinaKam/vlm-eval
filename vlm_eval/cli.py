@@ -26,7 +26,7 @@ import json
 import sys
 import time
 
-from . import dataset, metrics, pipeline_config, report, review, runner
+from . import dataset, metrics, pipeline_config, preconditions, report, review, runner
 from .backends.openai_compat import OpenAICompatBackend
 from .config import REPORTS
 from .tasks import captions, grounding, summary
@@ -77,62 +77,76 @@ def cmd_download(a) -> None:
     print(f"downloaded {done}, failed {len(failed)}, total {len(items)}; failed ids: {failed[:20]}")
 
 
-def cmd_run(a) -> None:
-    _resolve(a)
-    be = _backend(a)
+# What each backend can actually do, declared once. `sweep` iterates it and the commands validate
+# against it, so the two cannot drift — a copy of this list is how a task silently went missing before.
+BACKEND_TASKS = {
+    "server": ["summary", "grounding", "captions", "tagging"],
+    # Florence-2 takes one image per forward pass, so there is no multi-image summary.
+    "florence": ["captions", "grounding", "tagging"],
+    "internvl": ["summary", "grounding", "captions", "tagging"],
+    # PaliGemma is single-image and single-turn: one question per call, no summary.
+    "paligemma": ["captions", "tagging"],
+}
+
+
+def _check_task(backend: str, task: str) -> None:
+    allowed = BACKEND_TASKS[backend]
+    if task not in allowed:
+        sys.exit(
+            f"{backend} does not support '{task}' — it can do: {', '.join(allowed)}.\n"
+            "This is an architectural limit, not a missing feature."
+        )
+
+
+def _read_bytes(item):
+    """Same failure message as the shared path, so a bad file reads the same in every run file."""
+    return runner._read_image(item)
+
+
+def run_task(be, *, task: str, model: str, cfg, limit=None, workers=1, repeats=1) -> None:
+    """Run one task with one backend. The single place that knows how a task is dispatched.
+
+    Every backend goes through here — a served model, Florence-2, a transformers checkpoint — because
+    the previous arrangement (each command carrying its own copy) drifted: one copy kept calling an
+    emptied constant and produced grounding rows with no detections at all, reporting success.
+    """
     prompts = dataset.load_prompts()
-    pipe = pipeline_config.load(prompts)
-    if not getattr(a, "allow_defaults", False):
-        pipe.strict()
-    elif pipe.defaulted:
-        print(f"WARNING: guessing {', '.join(pipe.defaulted)} — these may not match production", flush=True)
-    # `--chunk` is an experiment knob; without it the harness uses production's own batch size.
-    chunk = a.chunk if a.chunk is not None else pipe.chunk_size
-    cfg = runner.RunConfig(
-        model=a.model,
-        chunk_size=chunk,
-        individual=pipe.individual_questions,
-        repeats=a.repeats,
-        workers=a.workers,
-        logprobs=not a.no_logprobs,
-        coords=a.coords,
-        limit=a.limit,
-    )
     items = [it for it in dataset.load_manifest() if it.path.exists()]
-    if a.task == "tagging":
+
+    if task == "tagging":
         tags = dataset.load_tags()
         runner.run_over_items(
             items,
             lambda it: runner.run_tagging_one(be, it, tags, cfg),
-            runner.tagging_out(a.model, chunk),
-            repeats=a.repeats,
-            workers=a.workers,
-            limit=a.limit,
+            runner.tagging_out(model, cfg.chunk_size),
+            repeats=repeats,
+            workers=workers,
+            limit=limit,
         )
-    elif a.task == "captions":
+    elif task == "captions":
         cp = prompts.get("caption_prompts") or captions.DEFAULT_PROMPTS
         runner.run_over_items(
             items,
             lambda it: runner.run_captions_one(be, it, cp, cfg, prompts.get("prompt_templates")),
-            runner.captions_out(a.model),
+            runner.captions_out(model),
             repeats=1,
-            workers=a.workers,
-            limit=a.limit,
+            workers=workers,
+            limit=limit,
         )
-    elif a.task == "grounding":
+    elif task == "grounding":
         targets = grounding.load_targets()
         runner.run_over_items(
             items,
             lambda it: runner.run_grounding_one(be, it, targets, cfg),
-            runner.grounding_out(a.model),
+            runner.grounding_out(model),
             repeats=1,
-            workers=a.workers,
-            limit=a.limit,
+            workers=workers,
+            limit=limit,
         )
-    elif a.task == "summary":
+    elif task == "summary":
         prompt = (prompts.get("prompt_templates") or {}).get("multi_image_summary") or summary.DEFAULT_PROMPT
         props = dataset.load_jsonl(dataset.DATA / "properties.jsonl")
-        out = runner.summary_out(a.model)
+        out = runner.summary_out(model)
         done = {r["property_job_id"] for r in dataset.load_jsonl(out)}
         for p in props:
             if p["property_job_id"] in done:
@@ -143,6 +157,36 @@ def cmd_run(a) -> None:
                 f"property {p['property_job_id']}: {row['n_images']} images, {row['latency_s']}s, "
                 f"{len((row['summary'] or '').split())} words"
             )
+    else:
+        sys.exit(f"unknown task: {task}")
+
+
+def _pipeline_cfg(a, *, workers=1, logprobs=True, coords="norm1000"):
+    """RunConfig built from production's own settings — the same way for every backend."""
+    pipe = pipeline_config.load()
+    if not getattr(a, "allow_defaults", False):
+        pipe.strict()
+    elif pipe.defaulted:
+        print(f"WARNING: guessing {', '.join(pipe.defaulted)} — these may not match production", flush=True)
+    chunk = getattr(a, "chunk", None)
+    return runner.RunConfig(
+        model=a.model,
+        chunk_size=pipe.chunk_size if chunk is None else chunk,
+        individual=pipe.individual_questions,
+        repeats=getattr(a, "repeats", 1),
+        workers=workers,
+        logprobs=logprobs,
+        coords=coords,
+        limit=getattr(a, "limit", None),
+    )
+
+
+def cmd_run(a) -> None:
+    _resolve(a)
+    preconditions.need_dataset(dataset.DATA)
+    be = _backend(a)
+    cfg = _pipeline_cfg(a, workers=a.workers, logprobs=not a.no_logprobs, coords=a.coords)
+    run_task(be, task=a.task, model=a.model, cfg=cfg, limit=a.limit, workers=a.workers, repeats=a.repeats)
 
 
 def cmd_perf(a) -> None:
@@ -186,7 +230,8 @@ def _primary_tagging_run(model: str):
 
 def cmd_metrics(a) -> None:
     _resolve(a)
-    gem = dataset.gemini_tags_by_image()
+    preconditions.need_run(runner.RUNS, a.model)
+    gem = dataset.reference_tags_by_image()
     d = runner.RUNS / a.model
     out: dict = {"model": a.model, "tagging": {}, "captions": {}, "grounding": {}, "summary": {}, "perf": {}}
     t15 = dataset.load_jsonl(_primary_tagging_run(a.model))
@@ -244,6 +289,7 @@ def cmd_florence(a) -> None:
     from .backends.florence_hf import FlorenceBackend
     from .tasks import tagging
 
+    _check_task("florence", a.task)
     be = FlorenceBackend(a.checkpoint, device=a.device)
     model = a.model or be.name
     items = [it for it in dataset.load_manifest() if it.path.exists()]
@@ -270,7 +316,7 @@ def cmd_florence(a) -> None:
         def fn(it):
             img = _img(it)
             dets, lat = {}, {}
-            for label, desc in grounding.TARGETS.items():
+            for label, desc in grounding.load_targets().items():
                 dets[label], lat[label] = be.ovd(img, desc.split(" (")[0])
             return {
                 "image_id": it.image_id,
@@ -301,13 +347,17 @@ def cmd_florence(a) -> None:
                 "errors": [],
             }
 
-        out = runner.tagging_out(model, 15)  # stored under chunk15 so metrics/report pick it up
+        # Stored under production's batch size so `metrics` and `report` find it alongside the others,
+        # even though open-vocabulary detection asks one phrase at a time.
+        out = runner.tagging_out(model, pipeline_config.load().chunk_size)
     runner.run_over_items(items, fn, out, repeats=a.repeats, workers=1, limit=a.limit)
 
 
 def cmd_review(a) -> None:
     _resolve(a)
-    gem = dataset.gemini_tags_by_image()
+    preconditions.need_run(runner.RUNS, a.model)
+    preconditions.need_reference(dataset.DATA)
+    gem = dataset.reference_tags_by_image()
     rows = dataset.load_jsonl(_primary_tagging_run(a.model))
     if a.decisions:
         print(review.apply_decisions([dataset.ROOT / f for f in a.decisions]))
@@ -321,72 +371,39 @@ def cmd_review(a) -> None:
 
 
 def cmd_hf(a) -> None:
-    """InternVL3.5 / PaliGemma2 via transformers locally. Same run-file layout as `run`."""
-    from .tasks import tagging
+    """InternVL / PaliGemma via transformers. Goes through the same dispatcher as a served model."""
+    preconditions.need_dataset(dataset.DATA)
 
-    items = [it for it in dataset.load_manifest() if it.path.exists()]
-    tags = dataset.load_tags()
-    prompts = dataset.load_prompts()
     if a.backend == "internvl":
         from .backends.hf_chat import InternVLBackend
 
+        _check_task("internvl", a.task)
+
         be = InternVLBackend(a.checkpoint or "OpenGVLab/InternVL3_5-8B-HF", device=a.device)
         model = a.model or be.name
-        cfg = runner.RunConfig(
-            model=model,
-            chunk_size=a.chunk,
-            repeats=a.repeats,
-            workers=1,
-            logprobs=False,
-            coords="norm1000",
-            limit=a.limit,
-        )
-        if a.task == "tagging":
-            runner.run_over_items(
-                items,
-                lambda it: runner.run_tagging_one(be, it, tags, cfg),
-                runner.tagging_out(model, a.chunk),
-                repeats=a.repeats,
-                workers=1,
-                limit=a.limit,
-            )
-        elif a.task == "captions":
-            cp = prompts.get("caption_prompts") or captions.DEFAULT_PROMPTS
-            runner.run_over_items(
-                items,
-                lambda it: runner.run_captions_one(be, it, cp, cfg),
-                runner.captions_out(model),
-                repeats=1,
-                workers=1,
-                limit=a.limit,
-            )
-        elif a.task == "grounding":
-            runner.run_over_items(
-                items,
-                lambda it: runner.run_grounding_one(be, it, grounding.TARGETS, cfg),
-                runner.grounding_out(model),
-                repeats=1,
-                workers=1,
-                limit=a.limit,
-            )
-        elif a.task == "summary":
-            prompt = (prompts.get("prompt_templates") or {}).get("multi_image_summary") or summary.DEFAULT_PROMPT
-            props = dataset.load_jsonl(dataset.DATA / "properties.jsonl")
-            out = runner.summary_out(model)
-            done = {r["property_job_id"] for r in dataset.load_jsonl(out)}
-            for pr in props:
-                if pr["property_job_id"] not in done:
-                    runner._append(out, runner.run_summary_one(be, pr, prompt, dataset.IMAGES))
-    else:  # paligemma
+        a.model = model
+        cfg = _pipeline_cfg(a, workers=1, logprobs=False, coords="norm1000")
+        run_task(be, task=a.task, model=model, cfg=cfg, limit=a.limit, workers=1, repeats=a.repeats)
+    else:
         from .backends.hf_chat import PaliGemmaBackend
+        from .tasks import tagging
+
+        _check_task("paligemma", a.task)
 
         be = PaliGemmaBackend(a.checkpoint or "google/paligemma2-3b-mix-448", device=a.device)
         model = a.model or be.name
+        a.model = model
+        cfg = _pipeline_cfg(a, workers=1, logprobs=False, coords="abs")
+        tags = dataset.load_tags()
+        items = [it for it in dataset.load_manifest() if it.path.exists()]
+
+        # PaliGemma answers one question per call and has no JSON mode, so it cannot go through the
+        # shared tagging path; the rows it writes are the same shape.
         if a.task == "tagging":
 
             def fn(it):
                 q = tagging.questions_for(it.image_type, tags)
-                row = be.tagging_rows(it.path.read_bytes(), q)
+                row = be.tagging_rows(_read_bytes(it), q)
                 return {
                     "image_id": it.image_id,
                     "image_type": it.image_type,
@@ -398,11 +415,18 @@ def cmd_hf(a) -> None:
                     "errors": [],
                 }
 
-            runner.run_over_items(items, fn, runner.tagging_out(model, 15), repeats=a.repeats, workers=1, limit=a.limit)
+            runner.run_over_items(
+                items,
+                fn,
+                runner.tagging_out(model, cfg.chunk_size),
+                repeats=a.repeats,
+                workers=1,
+                limit=a.limit,
+            )
         elif a.task == "captions":
 
             def fn(it):
-                img = it.path.read_bytes()
+                img = _read_bytes(it)
                 r1 = be.chat([img], "caption en", max_tokens=64)
                 r2 = be.chat([img], "describe en", max_tokens=256)
                 return {
@@ -416,10 +440,10 @@ def cmd_hf(a) -> None:
                 }
 
             runner.run_over_items(items, fn, runner.captions_out(model), repeats=1, workers=1, limit=a.limit)
-        else:
-            sys.exit("paligemma supports tasks: tagging, captions (grounding via 'detect' TBD; no multi-image)")
-    subprocess_metrics = argparse.Namespace(model=model)
-    cmd_metrics(subprocess_metrics)
+        else:  # pragma: no cover - _check_task rejects anything else before we get here
+            sys.exit(f"unhandled task for paligemma: {a.task}")
+
+    cmd_metrics(argparse.Namespace(model=model))
 
 
 def _script(name: str, *args: str) -> int:
@@ -494,8 +518,9 @@ def _sweep_local(a) -> None:
     """Full run for a transformers-backed model, skipping the tasks its architecture cannot do."""
     import argparse as _argparse
 
+    limits = {"summary": None, "grounding": a.grounding, "captions": a.captions, "tagging": a.tagging}
     if a.via == "florence":
-        supported = [("captions", a.captions), ("grounding", a.grounding), ("tagging", a.tagging)]
+        supported = [(t, limits[t]) for t in BACKEND_TASKS["florence"]]
         run = cmd_florence
         base = {
             "checkpoint": a.checkpoint or "florence-community/Florence-2-large",
@@ -505,12 +530,12 @@ def _sweep_local(a) -> None:
         }
         note = "Florence-2 takes one image at a time, so there is no property summary."
     else:
-        supported = [("captions", a.captions), ("tagging", a.tagging)]
-        if a.via == "internvl":
-            supported = [("summary", None), ("grounding", a.grounding), *supported]
-            note = ""
-        else:
-            note = "PaliGemma is single-image and single-turn: no summary, and one call per tag."
+        supported = [(t, limits[t]) for t in BACKEND_TASKS[a.via]]
+        note = (
+            ""
+            if a.via == "internvl"
+            else "PaliGemma is single-image and single-turn: no summary, and one call per tag."
+        )
         run = cmd_hf
         base = {
             "backend": a.via,
@@ -559,8 +584,8 @@ def cmd_status(a) -> None:
         n = len(json.loads(f.read_text())) if f.exists() else 0
         print(f"  {label:<15} {n:>6}" if f.exists() else f"  {label:<15} missing")
     for name, label in (
-        ("gemini_tags.jsonl", "reference tags"),
-        ("gemini_captions.jsonl", "reference captions"),
+        (dataset.reference_path("tags", data).name, "reference tags"),
+        (dataset.reference_path("captions", data).name, "reference captions"),
         ("properties.jsonl", "listings"),
     ):
         f = data / name
@@ -631,6 +656,8 @@ def cmd_cost(a) -> None:
     if not command:
         sys.exit("VLM_EVAL_COST_COMMAND is not set (see .env.example) — name your app's cost command there")
 
+    if not (dataset.DATA / "manifest.csv").exists():
+        preconditions.fail("No dataset, so there are no image URLs to measure.", "vlm-eval export")
     urls = dataset.DATA / f"cost_urls_{a.type}.txt"
     if not urls.exists() or a.refresh:
         _script("make_cost_urls.py", "--type", a.type, "--limit", str(a.images))
@@ -686,36 +713,74 @@ def cmd_cost(a) -> None:
 
 
 def cmd_economics(a) -> None:
-    from .economics import Inputs, render
+    from .economics import check_measured, from_config, render
 
     path = dataset.DATA / "economics.json" if a.config is None else dataset.ROOT / a.config
     if not path.exists():
         sys.exit(
-            f"{path} not found. Create it with the numbers you measured, for example:\n"
+            f"{path} not found. Describe your options — whichever you run today is `current`:\n"
             + json.dumps(
                 {
-                    "api_cost_per_image": 0.001446,
-                    "api_cost_per_image_optimized": 0.000707,
-                    "gpu_usd_per_hour": 0.5832,
-                    "gpu_images_per_hour": 2000,
-                    "gpu_name": "L4 (spot)",
+                    "current": "paid API",
+                    "options": [
+                        {"name": "paid API", "kind": "per_image", "price": 0.001216},
+                        {
+                            "name": "GPU, autoscaled",
+                            "kind": "per_hour",
+                            "price": 0.5832,
+                            "throughput_per_hour": 2000,
+                            "cold_start_min": 3,
+                        },
+                        {
+                            "name": "GPU, always on",
+                            "kind": "per_hour",
+                            "price": 0.5832,
+                            "throughput_per_hour": 2000,
+                            "always_on": True,
+                        },
+                    ],
+                    "scenarios": [["last 3 months", 23466], ["current pace", 61072]],
                     "peak_hour_images": 12404,
                     "busy_hours_pct": 8.6,
-                    "scenarios": [["last 3 months", 23466], ["current pace", 61072]],
                 },
                 indent=2,
             )
         )
-    from .economics import Hosting
-
-    cfg = json.loads(path.read_text())
-    cfg["scenarios"] = [tuple(x) for x in cfg.get("scenarios", [])]
-    cfg["hosting"] = [Hosting(**h) for h in cfg.get("hosting", [])]
-    note = cfg.pop("note", "")
+    inputs, note = from_config(json.loads(path.read_text()))
+    # The arithmetic is trivial; the inputs are the whole point. Rendering a confident report from
+    # placeholder numbers is worse than refusing — it looks like an answer.
+    problems = check_measured(inputs)
+    if problems and not a.allow_unmeasured:
+        sys.exit(
+            "These inputs were never measured:\n  - "
+            + "\n  - ".join(problems)
+            + "\n\nMeasure them first (see the order in the README), or pass --allow-unmeasured to "
+            "render anyway — the report then says so."
+        )
     REPORTS.mkdir(parents=True, exist_ok=True)
     out = REPORTS / "economics.md"
-    out.write_text(render(Inputs(**cfg), currency_note=note))
-    print(f"wrote {out}")
+    warning = ""
+    if problems:
+        warning = "UNMEASURED INPUTS — this report is illustrative only: " + "; ".join(problems)
+    text = render(inputs, currency_note=note)
+    if warning:
+        text = f"> **{warning}**\n\n" + text
+    out.write_text(text)
+    print(f"wrote {out}" + (f"\nWARNING: {warning}" if warning else ""))
+
+
+def _economics_options() -> list:
+    """The priced options, if the economics config exists — so a card can reference one by name."""
+    path = dataset.DATA / "economics.json"
+    if not path.exists():
+        return []
+    from .economics import from_config
+
+    try:
+        inputs, _ = from_config(json.loads(path.read_text()))
+    except (ValueError, KeyError, TypeError):
+        return []
+    return inputs.options
 
 
 def _card(model: str) -> dict:
@@ -725,15 +790,30 @@ def _card(model: str) -> dict:
 
 def cmd_report(a) -> None:
     _resolve(a)
-    m = json.loads((runner.RUNS / a.model / "metrics.json").read_text())
+    metrics_path = preconditions.need_metrics(runner.RUNS, a.model)
+    preconditions.warn_if_stale(
+        metrics_path, sorted((runner.RUNS / a.model).glob("*.jsonl")), f"vlm-eval metrics {a.model}"
+    )
+    card_path = REPORTS / "cards" / f"{a.model}.json"
+    if not card_path.exists():
+        print(
+            f"NOTE: no {card_path.relative_to(dataset.ROOT)} — licence, checkpoint, VRAM and the verdict "
+            "will be blank.\n      Create it to fill the model table.",
+            flush=True,
+        )
+    m = json.loads(metrics_path.read_text())
+    options = _economics_options()
     REPORTS.mkdir(parents=True, exist_ok=True)
     out = REPORTS / f"{a.model}.md"
-    out.write_text(report.render_model(_card(a.model), m))
+    out.write_text(report.render_model(_card(a.model), m, options=options))
     print(f"wrote {out}")
 
 
 def cmd_compare(a) -> None:
     a.models = [_presets().get(m, {}).get("run_name", m) for m in a.models]
+    for model in a.models:
+        path = preconditions.need_metrics(runner.RUNS, model)
+        preconditions.warn_if_stale(path, sorted((runner.RUNS / model).glob("*.jsonl")), f"vlm-eval metrics {model}")
     cards = [_card(m) for m in a.models]
     ms = [json.loads((runner.RUNS / m / "metrics.json").read_text()) for m in a.models]
     out = REPORTS / "comparison.md"
@@ -868,6 +948,11 @@ def main(argv=None) -> None:
 
     s = sub.add_parser("economics", help="self-host vs pay-per-call, from measured inputs")
     s.add_argument("--config", default=None, help="default: <data>/economics.json")
+    s.add_argument(
+        "--allow-unmeasured",
+        action="store_true",
+        help="render even if the inputs are still placeholders (the report will say so)",
+    )
     s.set_defaults(fn=cmd_economics)
 
     a = p.parse_args(argv)
