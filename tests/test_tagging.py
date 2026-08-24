@@ -63,10 +63,16 @@ def test_parse_answers_garbage_returns_none_per_slug():
 def test_confidence_from_logprobs_reads_prob_at_value_token():
     # token stream for '{"a": true, "b": false}'
     toks = [
-        ('{"', -0.01, {}), ("a", -0.01, {}), ('":', -0.01, {}), (" true", -0.105, {" true": -0.105, " false": -2.3}),
-        (',"', -0.01, {}), ("b", -0.01, {}), ('":', -0.01, {}), (" false", -0.02, {" false": -0.02, " true": -4.0}),
+        ('{"', -0.01, {}),
+        ("a", -0.01, {}),
+        ('":', -0.01, {}),
+        (" true", -0.105, {" true": -0.105, " false": -2.3}),
+        (',"', -0.01, {}),
+        ("b", -0.01, {}),
+        ('":', -0.01, {}),
+        (" false", -0.02, {" false": -0.02, " true": -4.0}),
         ("}", -0.01, {}),
     ]
     conf = tagging.confidence_from_logprobs(toks, ["a", "b"])
-    assert round(conf["a"], 2) == 0.90     # P(true) = exp(-0.105)
-    assert round(conf["b"], 2) == 0.02     # P(true) = exp(-4.0) from top_logprobs
+    assert round(conf["a"], 2) == 0.90  # P(true) = exp(-0.105)
+    assert round(conf["b"], 2) == 0.02  # P(true) = exp(-4.0) from top_logprobs

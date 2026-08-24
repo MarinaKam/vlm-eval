@@ -10,6 +10,7 @@ Two flavors:
 Both expose chat(images, prompt, ...) -> Response like the OpenAI backend, so runner.py works unchanged
 (json_schema is accepted but ignored — parsing stays lenient).
 """
+
 import io
 import time
 from typing import Any
@@ -19,6 +20,7 @@ from .base import Response
 
 def _pick_device():
     import torch
+
     if torch.cuda.is_available():
         return "cuda"
     if torch.backends.mps.is_available():
@@ -28,6 +30,7 @@ def _pick_device():
 
 def _to_pil(images: list[bytes]):
     from PIL import Image as PILImage
+
     return [PILImage.open(io.BytesIO(b)).convert("RGB") for b in images]
 
 
@@ -39,27 +42,44 @@ class InternVLBackend:
         self.device = device or _pick_device()
         dtype = torch.float16 if self.device != "cpu" else torch.float32
         self.processor = AutoProcessor.from_pretrained(checkpoint)
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            checkpoint, torch_dtype=dtype, low_cpu_mem_usage=True).to(self.device).eval()
+        self.model = (
+            AutoModelForImageTextToText.from_pretrained(checkpoint, torch_dtype=dtype, low_cpu_mem_usage=True)
+            .to(self.device)
+            .eval()
+        )
         self.name = checkpoint.split("/")[-1].lower()
 
-    def chat(self, images: list[bytes], prompt: str, *, json_schema: dict | None = None, max_tokens: int = 1024,
-             temperature: float = 0.0, logprobs: bool = False) -> Response:
+    def chat(
+        self,
+        images: list[bytes],
+        prompt: str,
+        *,
+        json_schema: dict | None = None,
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
+        logprobs: bool = False,
+    ) -> Response:
         import torch
 
         pils = _to_pil(images)
         content = [{"type": "image", "image": im} for im in pils] + [{"type": "text", "text": prompt}]
         messages = [{"role": "user", "content": content}]
         inputs = self.processor.apply_chat_template(
-            messages, add_generation_prompt=True, tokenize=True, return_dict=True, return_tensors="pt",
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
         ).to(self.device)
         t0 = time.perf_counter()
         with torch.no_grad():
             out = self.model.generate(
-                **inputs, max_new_tokens=max_tokens,
-                do_sample=temperature > 0, temperature=temperature if temperature > 0 else None,
+                **inputs,
+                max_new_tokens=max_tokens,
+                do_sample=temperature > 0,
+                temperature=temperature if temperature > 0 else None,
             )
-        text = self.processor.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0]
+        text = self.processor.batch_decode(out[:, inputs["input_ids"].shape[1] :], skip_special_tokens=True)[0]
         return Response(text=text, latency_s=time.perf_counter() - t0)
 
 
@@ -74,12 +94,23 @@ class PaliGemmaBackend:
         self.device = device or _pick_device()
         dtype = torch.float16 if self.device != "cpu" else torch.float32
         self.processor = AutoProcessor.from_pretrained(checkpoint)
-        self.model = PaliGemmaForConditionalGeneration.from_pretrained(
-            checkpoint, torch_dtype=dtype, low_cpu_mem_usage=True).to(self.device).eval()
+        self.model = (
+            PaliGemmaForConditionalGeneration.from_pretrained(checkpoint, torch_dtype=dtype, low_cpu_mem_usage=True)
+            .to(self.device)
+            .eval()
+        )
         self.name = checkpoint.split("/")[-1].lower()
 
-    def chat(self, images: list[bytes], prompt: str, *, json_schema: dict | None = None, max_tokens: int = 128,
-             temperature: float = 0.0, logprobs: bool = False) -> Response:
+    def chat(
+        self,
+        images: list[bytes],
+        prompt: str,
+        *,
+        json_schema: dict | None = None,
+        max_tokens: int = 128,
+        temperature: float = 0.0,
+        logprobs: bool = False,
+    ) -> Response:
         import torch
 
         pils = _to_pil(images)
@@ -89,7 +120,7 @@ class PaliGemmaBackend:
         t0 = time.perf_counter()
         with torch.no_grad():
             out = self.model.generate(**inputs, max_new_tokens=max_tokens, do_sample=False)
-        text = self.processor.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0]
+        text = self.processor.batch_decode(out[:, inputs["input_ids"].shape[1] :], skip_special_tokens=True)[0]
         return Response(text=text.strip(), latency_s=time.perf_counter() - t0)
 
     def answer_yes_no(self, image: bytes, question: str) -> tuple[bool | None, str, float]:
@@ -109,5 +140,10 @@ class PaliGemmaBackend:
             answers[slug] = ans
             raw[slug] = txt
             total += lat
-        return {"answers": answers, "confidence": {}, "latency_s": round(total, 3),
-                "n_calls": len(questions), "raw": raw}
+        return {
+            "answers": answers,
+            "confidence": {},
+            "latency_s": round(total, 3),
+            "n_calls": len(questions),
+            "raw": raw,
+        }

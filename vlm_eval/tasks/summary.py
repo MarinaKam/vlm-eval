@@ -2,6 +2,7 @@
 images first, then the prompt; JSON {"property_summary": str};
 temperature 0.2; max_output_tokens 1000; MAX_IMAGES_PER_PROPERTY = 20; images resized to 1536px / q85.
 """
+
 import re
 from typing import Any
 

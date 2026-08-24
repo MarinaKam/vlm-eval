@@ -1,4 +1,5 @@
 """Metrics over run JSONL rows. Pure functions, no I/O."""
+
 import statistics
 from collections import defaultdict
 from typing import Any
@@ -57,8 +58,11 @@ def tagging_agreement(rows: list[dict], gemini: dict[int, dict], *, repeat: int 
             "unparsed_rate": _pct(c["null"], judged + c["null"]),
         }
 
-    return {"n_images": n_images, "overall": derived(tot),
-            "per_tag": {slug: derived(c) for slug, c in sorted(per_tag.items())}}
+    return {
+        "n_images": n_images,
+        "overall": derived(tot),
+        "per_tag": {slug: derived(c) for slug, c in sorted(per_tag.items())},
+    }
 
 
 def tagging_consistency(rows: list[dict]) -> dict[str, Any]:
@@ -67,7 +71,7 @@ def tagging_consistency(rows: list[dict]) -> dict[str, Any]:
     for r in rows:
         by_img[r["image_id"]].append(r)
     jaccards, identical, n = [], 0, 0
-    for img, reps in by_img.items():
+    for reps in by_img.values():
         if len(reps) < 2:
             continue
         n += 1
@@ -78,8 +82,11 @@ def tagging_consistency(rows: list[dict]) -> dict[str, Any]:
             for j in range(i + 1, len(sets)):
                 u = sets[i] | sets[j]
                 jaccards.append(1.0 if not u else len(sets[i] & sets[j]) / len(u))
-    return {"n_images_with_repeats": n, "mean_jaccard": round(statistics.mean(jaccards), 3) if jaccards else None,
-            "identical_pct": _pct(identical, n)}
+    return {
+        "n_images_with_repeats": n,
+        "mean_jaccard": round(statistics.mean(jaccards), 3) if jaccards else None,
+        "identical_pct": _pct(identical, n),
+    }
 
 
 def tagging_chunk_comparison(rows_a: list[dict], rows_b: list[dict]) -> dict[str, Any]:
@@ -103,9 +110,13 @@ def latency_stats(values: list[float]) -> dict[str, Any]:
     if not values:
         return {"n": 0}
     vs = sorted(values)
-    return {"n": len(vs), "mean_s": round(statistics.mean(vs), 2), "median_s": round(statistics.median(vs), 2),
-            "p95_s": round(vs[min(len(vs) - 1, int(0.95 * len(vs)))], 2),
-            "images_per_hour_serial": round(3600 / statistics.mean(vs), 0)}
+    return {
+        "n": len(vs),
+        "mean_s": round(statistics.mean(vs), 2),
+        "median_s": round(statistics.median(vs), 2),
+        "p95_s": round(vs[min(len(vs) - 1, int(0.95 * len(vs)))], 2),
+        "images_per_hour_serial": round(3600 / statistics.mean(vs), 0),
+    }
 
 
 def caption_stats(rows: list[dict]) -> dict[str, Any]:
@@ -118,15 +129,19 @@ def caption_stats(rows: list[dict]) -> dict[str, Any]:
                 empty += 1
             else:
                 per_key[k].append(len(v.split()))
-    return {"n_images": len(rows), "empty_pct": _pct(empty, total),
-            "mean_words": {k: round(statistics.mean(v), 1) for k, v in per_key.items() if v},
-            "errors": sum(1 for r in rows if r.get("errors"))}
+    return {
+        "n_images": len(rows),
+        "empty_pct": _pct(empty, total),
+        "mean_words": {k: round(statistics.mean(v), 1) for k, v in per_key.items() if v},
+        "errors": sum(1 for r in rows if r.get("errors")),
+    }
 
 
 def grounding_stats(rows: list[dict], gemini: dict[int, dict]) -> dict[str, Any]:
     """Detection rate per target on images where Gemini tagged it present vs absent (sanity of localisation)."""
     out: dict[str, dict[str, int]] = defaultdict(
-        lambda: {"pos_img": 0, "pos_detected": 0, "neg_img": 0, "neg_detected": 0})
+        lambda: {"pos_img": 0, "pos_detected": 0, "neg_img": 0, "neg_detected": 0}
+    )
     for r in rows:
         g = gemini.get(r["image_id"], {}).get("tags", {})
         for label, dets in (r.get("detections") or {}).items():
@@ -135,5 +150,11 @@ def grounding_stats(rows: list[dict], gemini: dict[int, dict]) -> dict[str, Any]
             key = "pos" if label in g else "neg"
             out[label][f"{key}_img"] += 1
             out[label][f"{key}_detected"] += int(bool(dets))
-    return {label: {**c, "recall_vs_gemini": _pct(c["pos_detected"], c["pos_img"]),
-                    "fp_rate_vs_gemini": _pct(c["neg_detected"], c["neg_img"])} for label, c in out.items()}
+    return {
+        label: {
+            **c,
+            "recall_vs_gemini": _pct(c["pos_detected"], c["pos_img"]),
+            "fp_rate_vs_gemini": _pct(c["neg_detected"], c["neg_img"]),
+        }
+        for label, c in out.items()
+    }

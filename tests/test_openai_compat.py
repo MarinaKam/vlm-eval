@@ -12,10 +12,14 @@ def _server(captured: dict, content: str, logprobs=None):
         choice = {"message": {"role": "assistant", "content": content}}
         if logprobs is not None:
             choice["logprobs"] = {"content": logprobs}
-        return httpx.Response(200, json={
-            "choices": [choice],
-            "usage": {"prompt_tokens": 1200, "completion_tokens": 40, "total_tokens": 1240},
-        })
+        return httpx.Response(
+            200,
+            json={
+                "choices": [choice],
+                "usage": {"prompt_tokens": 1200, "completion_tokens": 40, "total_tokens": 1240},
+            },
+        )
+
     return httpx.MockTransport(handler)
 
 

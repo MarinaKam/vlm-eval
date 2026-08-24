@@ -1,13 +1,14 @@
 """vlm-eval CLI.
 
-  vlm-eval download                                  # fetch data/images from manifest (optimized like production)
-  vlm-eval run --model qwen2.5-vl-7b --base-url http://localhost:8000/v1 --task tagging [--chunk 15|0] [--repeats 3]
-  vlm-eval run ... --task captions|grounding|summary
-  vlm-eval perf --model ... --concurrency 4 --n 40      # throughput at concurrency (tagging, chunk 15)
-  vlm-eval metrics --model qwen2.5-vl-7b               # -> runs/<model>/metrics.json
-  vlm-eval report --model qwen2.5-vl-7b                # -> reports/<model>.md (needs cards/<model>.json)
-  vlm-eval compare --models a b c                      # -> reports/comparison.md
+vlm-eval download                                  # fetch data/images from manifest (optimized like production)
+vlm-eval run --model qwen2.5-vl-7b --base-url http://localhost:8000/v1 --task tagging [--chunk 15|0] [--repeats 3]
+vlm-eval run ... --task captions|grounding|summary
+vlm-eval perf --model ... --concurrency 4 --n 40      # throughput at concurrency (tagging, chunk 15)
+vlm-eval metrics --model qwen2.5-vl-7b               # -> runs/<model>/metrics.json
+vlm-eval report --model qwen2.5-vl-7b                # -> reports/<model>.md (needs cards/<model>.json)
+vlm-eval compare --models a b c                      # -> reports/comparison.md
 """
+
 import argparse
 import json
 import sys
@@ -15,9 +16,8 @@ import time
 
 from . import dataset, metrics, report, review, runner
 from .backends.openai_compat import OpenAICompatBackend
+from .config import REPORTS
 from .tasks import captions, grounding, summary
-
-from .config import REPORTS  # noqa: E402
 
 
 def _backend(a) -> OpenAICompatBackend:
@@ -35,21 +35,46 @@ def cmd_download(a) -> None:
 
 def cmd_run(a) -> None:
     be = _backend(a)
-    cfg = runner.RunConfig(model=a.model, chunk_size=a.chunk, repeats=a.repeats, workers=a.workers,
-                           logprobs=not a.no_logprobs, coords=a.coords, limit=a.limit)
+    cfg = runner.RunConfig(
+        model=a.model,
+        chunk_size=a.chunk,
+        repeats=a.repeats,
+        workers=a.workers,
+        logprobs=not a.no_logprobs,
+        coords=a.coords,
+        limit=a.limit,
+    )
     items = [it for it in dataset.load_manifest() if it.path.exists()]
     prompts = dataset.load_prompts()
     if a.task == "tagging":
         tags = dataset.load_tags()
-        runner.run_over_items(items, lambda it: runner.run_tagging_one(be, it, tags, cfg),
-                              runner.tagging_out(a.model, a.chunk), repeats=a.repeats, workers=a.workers, limit=a.limit)
+        runner.run_over_items(
+            items,
+            lambda it: runner.run_tagging_one(be, it, tags, cfg),
+            runner.tagging_out(a.model, a.chunk),
+            repeats=a.repeats,
+            workers=a.workers,
+            limit=a.limit,
+        )
     elif a.task == "captions":
         cp = prompts.get("caption_prompts") or captions.DEFAULT_PROMPTS
-        runner.run_over_items(items, lambda it: runner.run_captions_one(be, it, cp, cfg),
-                              runner.captions_out(a.model), repeats=1, workers=a.workers, limit=a.limit)
+        runner.run_over_items(
+            items,
+            lambda it: runner.run_captions_one(be, it, cp, cfg),
+            runner.captions_out(a.model),
+            repeats=1,
+            workers=a.workers,
+            limit=a.limit,
+        )
     elif a.task == "grounding":
-        runner.run_over_items(items, lambda it: runner.run_grounding_one(be, it, grounding.TARGETS, cfg),
-                              runner.grounding_out(a.model), repeats=1, workers=a.workers, limit=a.limit)
+        runner.run_over_items(
+            items,
+            lambda it: runner.run_grounding_one(be, it, grounding.TARGETS, cfg),
+            runner.grounding_out(a.model),
+            repeats=1,
+            workers=a.workers,
+            limit=a.limit,
+        )
     elif a.task == "summary":
         prompt = (prompts.get("prompt_templates") or {}).get("multi_image_summary") or summary.DEFAULT_PROMPT
         props = dataset.load_jsonl(dataset.DATA / "properties.jsonl")
@@ -60,8 +85,10 @@ def cmd_run(a) -> None:
                 continue
             row = runner.run_summary_one(be, p, prompt, dataset.IMAGES)
             runner._append(out, row)
-            print(f"property {p['property_job_id']}: {row['n_images']} images, {row['latency_s']}s, "
-                  f"{len((row['summary'] or '').split())} words")
+            print(
+                f"property {p['property_job_id']}: {row['n_images']} images, {row['latency_s']}s, "
+                f"{len((row['summary'] or '').split())} words"
+            )
 
 
 def cmd_perf(a) -> None:
@@ -73,11 +100,17 @@ def cmd_perf(a) -> None:
     if out.exists():
         out.unlink()
     t0 = time.perf_counter()
-    n = runner.run_over_items(items, lambda it: runner.run_tagging_one(be, it, tags, cfg), out,
-                              repeats=1, workers=a.concurrency)
+    n = runner.run_over_items(
+        items, lambda it: runner.run_tagging_one(be, it, tags, cfg), out, repeats=1, workers=a.concurrency
+    )
     el = time.perf_counter() - t0
-    res = {"model": a.model, "concurrency": a.concurrency, "n_images": n, "elapsed_s": round(el, 1),
-           "images_per_hour_measured": round(n / el * 3600) if el else None}
+    res = {
+        "model": a.model,
+        "concurrency": a.concurrency,
+        "n_images": n,
+        "elapsed_s": round(el, 1),
+        "images_per_hour_measured": round(n / el * 3600) if el else None,
+    }
     (runner.RUNS / a.model / f"perf_c{a.concurrency}.json").write_text(json.dumps(res, indent=2))
     print(json.dumps(res))
 
@@ -101,25 +134,37 @@ def cmd_metrics(a) -> None:
             out["tagging"]["chunk_all_agreement_pct"] = metrics.tagging_chunk_comparison(t15, tall)["agreement_pct"]
     caps = dataset.load_jsonl(runner.captions_out(a.model))
     if caps:
-        out["captions"] = {**metrics.caption_stats(caps),
-                           "latency": metrics.latency_stats([r["latency_s"] for r in caps])}
+        out["captions"] = {
+            **metrics.caption_stats(caps),
+            "latency": metrics.latency_stats([r["latency_s"] for r in caps]),
+        }
     gr = dataset.load_jsonl(runner.grounding_out(a.model))
     if gr:
         out["grounding"] = metrics.grounding_stats(gr, gem)
     sm = dataset.load_jsonl(runner.summary_out(a.model))
     if sm:
-        out["summary"] = {"n": len(sm), "ok": sum(1 for r in sm if r.get("summary")),
-                          "mean_words": round(sum(len((r.get("summary") or "").split()) for r in sm) / len(sm), 1),
-                          "latency": metrics.latency_stats([r["latency_s"] for r in sm])}
+        out["summary"] = {
+            "n": len(sm),
+            "ok": sum(1 for r in sm if r.get("summary")),
+            "mean_words": round(sum(len((r.get("summary") or "").split()) for r in sm) / len(sm), 1),
+            "latency": metrics.latency_stats([r["latency_s"] for r in sm]),
+        }
     perfs = sorted(d.glob("perf_c*.json"))
     if perfs:
         best = max((json.loads(p.read_text()) for p in perfs), key=lambda r: r.get("images_per_hour_measured") or 0)
         out["perf"] = best
     (d / "metrics.json").write_text(json.dumps(out, indent=2))
-    print(json.dumps({k: v for k, v in out.items() if k != "tagging"} | {
-        "tagging_overall": out["tagging"].get("agreement", {}).get("overall"),
-        "tagging_consistency": out["tagging"].get("consistency"),
-        "tagging_latency": out["tagging"].get("latency")}, indent=2))
+    print(
+        json.dumps(
+            {k: v for k, v in out.items() if k != "tagging"}
+            | {
+                "tagging_overall": out["tagging"].get("agreement", {}).get("overall"),
+                "tagging_consistency": out["tagging"].get("consistency"),
+                "tagging_latency": out["tagging"].get("latency"),
+            },
+            indent=2,
+        )
+    )
 
 
 def cmd_florence(a) -> None:
@@ -138,26 +183,54 @@ def cmd_florence(a) -> None:
         return PILImage.open(it.path).convert("RGB")
 
     if a.task == "captions":
+
         def fn(it):
-            return {"image_id": it.image_id, "image_type": it.image_type, **be.captions(_img(it)),
-                    "usage": {}, "raw": "", "errors": []}
+            return {
+                "image_id": it.image_id,
+                "image_type": it.image_type,
+                **be.captions(_img(it)),
+                "usage": {},
+                "raw": "",
+                "errors": [],
+            }
+
         out = runner.captions_out(model)
     elif a.task == "grounding":
+
         def fn(it):
             img = _img(it)
             dets, lat = {}, {}
             for label, desc in grounding.TARGETS.items():
                 dets[label], lat[label] = be.ovd(img, desc.split(" (")[0])
-            return {"image_id": it.image_id, "image_type": it.image_type, "width": img.width, "height": img.height,
-                    "detections": dets, "latency_s": lat, "raw": {}, "errors": []}
+            return {
+                "image_id": it.image_id,
+                "image_type": it.image_type,
+                "width": img.width,
+                "height": img.height,
+                "detections": dets,
+                "latency_s": lat,
+                "raw": {},
+                "errors": [],
+            }
+
         out = runner.grounding_out(model)
     else:  # tagging via open-vocabulary detection
+
         def fn(it):
             q = tagging.questions_for(it.image_type, tags)
             qt = [t for t in tags if t["slug"] in q]
             r = be.tagging_via_ovd(_img(it), qt)
-            return {"image_id": it.image_id, "image_type": it.image_type, "chunk_size": 1,
-                    "n_questions": len(q), **r, "call_latencies_s": [], "usage": {}, "errors": []}
+            return {
+                "image_id": it.image_id,
+                "image_type": it.image_type,
+                "chunk_size": 1,
+                "n_questions": len(q),
+                **r,
+                "call_latencies_s": [],
+                "usage": {},
+                "errors": [],
+            }
+
         out = runner.tagging_out(model, 15)  # stored under chunk15 so metrics/report pick it up
     runner.run_over_items(items, fn, out, repeats=a.repeats, workers=1, limit=a.limit)
 
@@ -171,8 +244,10 @@ def cmd_review(a) -> None:
         return
     cases = review.sample_by_tag(review.disagreements(rows, gem, dataset.load_tags()), per_tag=a.per_tag)
     out = review.build_review_html(a.model, cases, REPORTS / "review" / f"{a.model}.html")
-    print(f"{len(cases)} cases -> open {out} in a browser, then: vlm-eval review --model {a.model} "
-          f"--decisions <downloaded json>")
+    print(
+        f"{len(cases)} cases -> open {out} in a browser, then: vlm-eval review --model {a.model} "
+        f"--decisions <downloaded json>"
+    )
 
 
 def cmd_hf(a) -> None:
@@ -184,20 +259,46 @@ def cmd_hf(a) -> None:
     prompts = dataset.load_prompts()
     if a.backend == "internvl":
         from .backends.hf_chat import InternVLBackend
+
         be = InternVLBackend(a.checkpoint or "OpenGVLab/InternVL3_5-8B-HF", device=a.device)
         model = a.model or be.name
-        cfg = runner.RunConfig(model=model, chunk_size=a.chunk, repeats=a.repeats, workers=1,
-                               logprobs=False, coords="norm1000", limit=a.limit)
+        cfg = runner.RunConfig(
+            model=model,
+            chunk_size=a.chunk,
+            repeats=a.repeats,
+            workers=1,
+            logprobs=False,
+            coords="norm1000",
+            limit=a.limit,
+        )
         if a.task == "tagging":
-            runner.run_over_items(items, lambda it: runner.run_tagging_one(be, it, tags, cfg),
-                                  runner.tagging_out(model, a.chunk), repeats=a.repeats, workers=1, limit=a.limit)
+            runner.run_over_items(
+                items,
+                lambda it: runner.run_tagging_one(be, it, tags, cfg),
+                runner.tagging_out(model, a.chunk),
+                repeats=a.repeats,
+                workers=1,
+                limit=a.limit,
+            )
         elif a.task == "captions":
             cp = prompts.get("caption_prompts") or captions.DEFAULT_PROMPTS
-            runner.run_over_items(items, lambda it: runner.run_captions_one(be, it, cp, cfg),
-                                  runner.captions_out(model), repeats=1, workers=1, limit=a.limit)
+            runner.run_over_items(
+                items,
+                lambda it: runner.run_captions_one(be, it, cp, cfg),
+                runner.captions_out(model),
+                repeats=1,
+                workers=1,
+                limit=a.limit,
+            )
         elif a.task == "grounding":
-            runner.run_over_items(items, lambda it: runner.run_grounding_one(be, it, grounding.TARGETS, cfg),
-                                  runner.grounding_out(model), repeats=1, workers=1, limit=a.limit)
+            runner.run_over_items(
+                items,
+                lambda it: runner.run_grounding_one(be, it, grounding.TARGETS, cfg),
+                runner.grounding_out(model),
+                repeats=1,
+                workers=1,
+                limit=a.limit,
+            )
         elif a.task == "summary":
             prompt = (prompts.get("prompt_templates") or {}).get("multi_image_summary") or summary.DEFAULT_PROMPT
             props = dataset.load_jsonl(dataset.DATA / "properties.jsonl")
@@ -208,24 +309,42 @@ def cmd_hf(a) -> None:
                     runner._append(out, runner.run_summary_one(be, pr, prompt, dataset.IMAGES))
     else:  # paligemma
         from .backends.hf_chat import PaliGemmaBackend
+
         be = PaliGemmaBackend(a.checkpoint or "google/paligemma2-3b-mix-448", device=a.device)
         model = a.model or be.name
         if a.task == "tagging":
+
             def fn(it):
                 q = tagging.questions_for(it.image_type, tags)
                 row = be.tagging_rows(it.path.read_bytes(), q)
-                return {"image_id": it.image_id, "image_type": it.image_type, "chunk_size": 1,
-                        "n_questions": len(q), **row, "call_latencies_s": [], "usage": {}, "errors": []}
-            runner.run_over_items(items, fn, runner.tagging_out(model, 15),
-                                  repeats=a.repeats, workers=1, limit=a.limit)
+                return {
+                    "image_id": it.image_id,
+                    "image_type": it.image_type,
+                    "chunk_size": 1,
+                    "n_questions": len(q),
+                    **row,
+                    "call_latencies_s": [],
+                    "usage": {},
+                    "errors": [],
+                }
+
+            runner.run_over_items(items, fn, runner.tagging_out(model, 15), repeats=a.repeats, workers=1, limit=a.limit)
         elif a.task == "captions":
+
             def fn(it):
                 img = it.path.read_bytes()
                 r1 = be.chat([img], "caption en", max_tokens=64)
                 r2 = be.chat([img], "describe en", max_tokens=256)
-                return {"image_id": it.image_id, "image_type": it.image_type,
-                        "captions": {"base_caption": r1.text, "detailed_caption": r2.text},
-                        "latency_s": round(r1.latency_s + r2.latency_s, 3), "usage": {}, "raw": "", "errors": []}
+                return {
+                    "image_id": it.image_id,
+                    "image_type": it.image_type,
+                    "captions": {"base_caption": r1.text, "detailed_caption": r2.text},
+                    "latency_s": round(r1.latency_s + r2.latency_s, 3),
+                    "usage": {},
+                    "raw": "",
+                    "errors": [],
+                }
+
             runner.run_over_items(items, fn, runner.captions_out(model), repeats=1, workers=1, limit=a.limit)
         else:
             sys.exit("paligemma supports tasks: tagging, captions (grounding via 'detect' TBD; no multi-image)")

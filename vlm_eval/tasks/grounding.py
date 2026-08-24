@@ -7,6 +7,7 @@ conventions differ per model family and are passed in as `coords`:
 Florence-2 uses its own task tokens (see backends/florence_hf.py) and returns absolute pixels.
 Output is normalised to [x1, y1, x2, y2] in 0..1 so boxes are comparable across models.
 """
+
 from typing import Any
 
 from .tagging import _loads_lenient

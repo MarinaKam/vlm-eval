@@ -4,12 +4,13 @@
 
 Copies (optimized) images into data/images/<n>.jpg with ids 900001+, no Gemini ground truth.
 """
+
 import csv
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from vlm_eval.dataset import DATA, IMAGES, optimize  # noqa: E402
+from vlm_eval.dataset import DATA, IMAGES, optimize
 
 src, kind = Path(sys.argv[1]), sys.argv[2]
 limit = int(sys.argv[3]) if len(sys.argv) > 3 else 5

@@ -5,6 +5,7 @@ sample of disagreement cases; the reviewer picks the truth per row and clicks "D
 saves a JSON file. `apply_decisions` merges such files into data/manual_labels.json, and
 `manual_agreement` scores any model run against those human labels.
 """
+
 import html
 import json
 import random
@@ -29,9 +30,16 @@ def disagreements(rows: list[dict], gemini: dict[int, dict], tags: list[dict]) -
             ans = r["answers"].get(slug)
             if ans is None or ans == (slug in g_pos):
                 continue
-            out.append({"image_id": r["image_id"], "slug": slug, "question": q.get(slug, slug),
-                        "gemini": slug in g_pos, "model": bool(ans),
-                        "model_conf": (r.get("confidence") or {}).get(slug)})
+            out.append(
+                {
+                    "image_id": r["image_id"],
+                    "slug": slug,
+                    "question": q.get(slug, slug),
+                    "gemini": slug in g_pos,
+                    "model": bool(ans),
+                    "model_conf": (r.get("confidence") or {}).get(slug),
+                }
+            )
     return out
 
 
@@ -54,9 +62,9 @@ def build_review_html(model: str, cases: list[dict], out: Path) -> Path:
         rows.append(f"""
 <tr data-i="{i}">
  <td><img src="file://{img}" loading="lazy"></td>
- <td><b>{html.escape(c['slug'])}</b><br><small>{html.escape(c['question'])}</small><br>
-     Gemini: <b>{c['gemini']}</b> · {html.escape(model)}: <b>{c['model']}</b>
-     {'' if c.get('model_conf') is None else f"(p={c['model_conf']:.2f})"}</td>
+ <td><b>{html.escape(c["slug"])}</b><br><small>{html.escape(c["question"])}</small><br>
+     Gemini: <b>{c["gemini"]}</b> · {html.escape(model)}: <b>{c["model"]}</b>
+     {"" if c.get("model_conf") is None else f"(p={c['model_conf']:.2f})"}</td>
  <td><label><input type=radio name=r{i} value=true> present</label><br>
      <label><input type=radio name=r{i} value=false> absent</label><br>
      <label><input type=radio name=r{i} value=unsure> unsure</label></td>
@@ -67,7 +75,7 @@ def build_review_html(model: str, cases: list[dict], out: Path) -> Path:
 td{{vertical-align:top;padding:6px;border-bottom:1px solid #ddd}}</style>
 <h2>Review disagreements: Gemini vs {html.escape(model)} ({len(cases)} cases)</h2>
 <p>Pick the truth for each row, then <button onclick="dl()">Download decisions</button></p>
-<table>{''.join(rows)}</table>
+<table>{"".join(rows)}</table>
 <script>
 const CASES={data};
 function dl(){{const out=[];CASES.forEach((c,i)=>{{const v=document.querySelector('input[name=r'+i+']:checked');
@@ -102,7 +110,7 @@ def manual_agreement(rows: list[dict], gemini: dict[int, dict], store: Path = DA
     labels = json.loads(store.read_text())
     by_img = {r["image_id"]: r for r in rows if r.get("repeat", 0) == 0}
     n = model_ok = gemini_ok = 0
-    for key, lab in labels.items():
+    for lab in labels.values():
         r = by_img.get(lab["image_id"])
         if not r or lab["slug"] not in r["answers"] or r["answers"][lab["slug"]] is None:
             continue
@@ -110,5 +118,8 @@ def manual_agreement(rows: list[dict], gemini: dict[int, dict], store: Path = DA
         model_ok += int(bool(r["answers"][lab["slug"]]) == lab["truth"])
         g_pos = lab["slug"] in gemini.get(lab["image_id"], {}).get("tags", {})
         gemini_ok += int(g_pos == lab["truth"])
-    return {"n": n, "model_correct_pct": round(100 * model_ok / n, 1) if n else None,
-            "gemini_correct_pct": round(100 * gemini_ok / n, 1) if n else None}
+    return {
+        "n": n,
+        "model_correct_pct": round(100 * model_ok / n, 1) if n else None,
+        "gemini_correct_pct": round(100 * gemini_ok / n, 1) if n else None,
+    }

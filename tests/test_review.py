@@ -18,8 +18,9 @@ def test_html_decisions_roundtrip(tmp_path):
     out = review.build_review_html("m", cases, tmp_path / "r.html")
     assert "Download decisions" in out.read_text()
     dec = tmp_path / "d.json"
-    dec.write_text(json.dumps([{"image_id": 1, "slug": "pool", "truth": True},
-                               {"image_id": 1, "slug": "garden", "truth": None}]))
+    dec.write_text(
+        json.dumps([{"image_id": 1, "slug": "pool", "truth": True}, {"image_id": 1, "slug": "garden", "truth": None}])
+    )
     store = tmp_path / "labels.json"
     assert review.apply_decisions([dec], store) == {"added": 1, "total": 1}
     rows = [{"image_id": 1, "repeat": 0, "answers": {"pool": False}}]

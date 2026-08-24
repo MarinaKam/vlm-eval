@@ -15,22 +15,29 @@ Writes to ~/PycharmProjects/vlm-eval/data/:
 
 Only SELECTs. Tunables are at the top.
 """
+
 import csv
-import json
 import functools
+import json
 import os
 import random
 from collections import defaultdict
 from datetime import timedelta
 from pathlib import Path
 
+from computer_vision.models import (
+    ClassificationTag,
+    FeatureType,
+    Image,
+    ImageFeature,
+    ImageProcessingFeature,
+    ImageProcessingJob,
+    ProcessingConfig,
+    Prompt,
+    PromptTemplate,
+    PropertyProcessingJob,
+)
 from django.utils import timezone
-
-from computer_vision.models import (ClassificationTag, FeatureType, Image,
-                                    ImageFeature, ImageProcessingFeature,
-                                    ImageProcessingJob, ProcessingConfig,
-                                    Prompt, PromptTemplate,
-                                    PropertyProcessingJob)
 
 json_dumps = functools.partial(json.dumps, default=str)
 # When piped through `manage.py shell`, __file__ is not this script — the data dir must come from env.
@@ -50,28 +57,32 @@ rng = random.Random(SEED)
 
 # ---------------------------------------------------------------- config / prompts
 all_tags = list(
-    ClassificationTag.objects.order_by("category", "order", "slug")
-    .values("slug", "name", "question_text", "category", "order", "is_active")
+    ClassificationTag.objects.order_by("category", "order", "slug").values(
+        "slug", "name", "question_text", "category", "order", "is_active"
+    )
 )
 active_tags = [t for t in all_tags if t["is_active"]]
 (OUT_DIR / "tags.json").write_text(json_dumps(all_tags, indent=2, ensure_ascii=False))
-print(f"tags.json: {len(all_tags)} classification tags ({len(active_tags)} active, "
-      f"{len(all_tags) - len(active_tags)} inactive)")
+print(
+    f"tags.json: {len(all_tags)} classification tags ({len(active_tags)} active, "
+    f"{len(all_tags) - len(active_tags)} inactive)"
+)
 
-caption_prompts = {
-    p["key__slug"]: p["text"]
-    for p in Prompt.objects.select_related("key").values("key__slug", "text")
-}
+caption_prompts = {p["key__slug"]: p["text"] for p in Prompt.objects.select_related("key").values("key__slug", "text")}
 templates = {t["slug"]: t["text"] for t in PromptTemplate.objects.filter(is_active=True).values("slug", "text")}
 configs = {
     c["key"]: {k: v for k, v in c.items() if k != "key" and v is not None}
-    for c in ProcessingConfig.objects.filter(is_active=True)
-    .values("key", "value_text", "value_int", "value_float", "value_bool", "value_json")
+    for c in ProcessingConfig.objects.filter(is_active=True).values(
+        "key", "value_text", "value_int", "value_float", "value_bool", "value_json"
+    )
 }
-(OUT_DIR / "prompts.json").write_text(json_dumps(
-    {"caption_prompts": caption_prompts, "prompt_templates": templates, "processing_config": configs},
-    indent=2, ensure_ascii=False,
-))
+(OUT_DIR / "prompts.json").write_text(
+    json_dumps(
+        {"caption_prompts": caption_prompts, "prompt_templates": templates, "processing_config": configs},
+        indent=2,
+        ensure_ascii=False,
+    )
+)
 print(f"prompts.json: {len(caption_prompts)} caption prompts, {len(templates)} templates, {len(configs)} configs")
 
 features = list(ImageProcessingFeature.objects.values("id", "slug", "type", "is_active", "show_in_classification"))
@@ -85,7 +96,8 @@ type_slugs = {"indoor", "outdoor", "other", "split"}
 since = timezone.now() - timedelta(days=DAYS_BACK)
 jobs = (
     ImageProcessingJob.objects.filter(status="completed", created_at__gte=since)
-    .exclude(image__s3_url__isnull=True).exclude(image__s3_url="")
+    .exclude(image__s3_url__isnull=True)
+    .exclude(image__s3_url="")
     .values("image_id", "created_at", "user_id")
     .order_by("-created_at")
 )
@@ -123,8 +135,10 @@ for i in image_ids:
 
 # Images whose type we cannot infer are skipped (other/split/unknown).
 typed = [i for i in image_ids if i in image_type]
-print(f"typed candidates: {len(typed)} (indoor={sum(1 for i in typed if image_type[i]=='indoor')}, "
-      f"outdoor={sum(1 for i in typed if image_type[i]=='outdoor')})")
+print(
+    f"typed candidates: {len(typed)} (indoor={sum(1 for i in typed if image_type[i] == 'indoor')}, "
+    f"outdoor={sum(1 for i in typed if image_type[i] == 'outdoor')})"
+)
 
 # ---------------------------------------------------------------- greedy tag cover, then stratified fill
 selected, covered = [], set()
@@ -138,8 +152,10 @@ while remaining:
     selected.append(best)
     covered |= gain
     remaining.discard(best)
-print(f"greedy cover: {len(selected)} images cover {len(covered)}/{len(all_slugs)} tags; "
-      f"uncovered={sorted(all_slugs - covered)}")
+print(
+    f"greedy cover: {len(selected)} images cover {len(covered)}/{len(all_slugs)} tags; "
+    f"uncovered={sorted(all_slugs - covered)}"
+)
 
 
 def _fill(kind, target):
@@ -160,8 +176,16 @@ with (OUT_DIR / "manifest.csv").open("w", newline="") as fh:
     w.writerow(["image_id", "url", "s3_url", "image_type", "user_id", "job_created_at"])
     for i in selected:
         img = images[i]
-        w.writerow([str(i), img.url, img.s3_url, image_type[i], str(job_by_image[i]["user_id"]),
-                    job_by_image[i]["created_at"].isoformat()])
+        w.writerow(
+            [
+                str(i),
+                img.url,
+                img.s3_url,
+                image_type[i],
+                str(job_by_image[i]["user_id"]),
+                job_by_image[i]["created_at"].isoformat(),
+            ]
+        )
 
 # Only slugs the account had active are stored at all (conf 0 for negatives), so the set of
 # stored classification slugs per image == the tags on which Gemini actually gave a verdict.
@@ -173,11 +197,17 @@ for r in ImageFeature.objects.filter(image_id__in=selected, feature_id__in=class
 
 with (OUT_DIR / "gemini_tags.jsonl").open("w") as fh:
     for i in selected:
-        fh.write(json_dumps({
-            "image_id": str(i), "image_type": image_type[i],
-            "tags": tags_by_image.get(i, {}),
-            "evaluable_slugs": sorted(evaluable.get(i, set()) - type_slugs),
-        }) + "\n")
+        fh.write(
+            json_dumps(
+                {
+                    "image_id": str(i),
+                    "image_type": image_type[i],
+                    "tags": tags_by_image.get(i, {}),
+                    "evaluable_slugs": sorted(evaluable.get(i, set()) - type_slugs),
+                }
+            )
+            + "\n"
+        )
 
 cap_rows = ImageFeature.objects.filter(image_id__in=selected, feature_id__in=caption_ids).values(
     "image_id", "feature__slug", "literal_value"
@@ -194,7 +224,8 @@ print(f"captions: {sum(1 for i in selected if caps.get(i))} images have captions
 # ---------------------------------------------------------------- property jobs for multi-image summary
 props = (
     PropertyProcessingJob.objects.filter(status="completed", created_at__gte=since)
-    .exclude(property_summary__isnull=True).exclude(property_summary="")
+    .exclude(property_summary__isnull=True)
+    .exclude(property_summary="")
     .order_by("-created_at")
 )
 written = 0
@@ -204,13 +235,21 @@ with (OUT_DIR / "properties.jsonl").open("w") as fh:
         if len(img_ids) < MIN_PROPERTY_IMAGES:
             continue
         urls = dict(Image.objects.filter(id__in=img_ids).values_list("id", "s3_url"))
-        fh.write(json_dumps({
-            "property_job_id": str(p.id), "property_id": p.property_id,
-            "image_ids": [str(i) for i in img_ids], "s3_urls": [urls.get(i) for i in img_ids],
-            "property_summary": p.property_summary,
-            "architectural_style": p.architectural_style,
-            "created_at": p.created_at.isoformat(),
-        }, ensure_ascii=False) + "\n")
+        fh.write(
+            json_dumps(
+                {
+                    "property_job_id": str(p.id),
+                    "property_id": p.property_id,
+                    "image_ids": [str(i) for i in img_ids],
+                    "s3_urls": [urls.get(i) for i in img_ids],
+                    "property_summary": p.property_summary,
+                    "architectural_style": p.architectural_style,
+                    "created_at": p.created_at.isoformat(),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
         written += 1
         if written >= MAX_PROPERTIES:
             break

@@ -9,6 +9,7 @@ It cannot answer 15 yes/no questions with a JSON schema. "Closest viable impleme
 (as the ticket asks): OPEN_VOCABULARY_DETECTION per tag name -> tag present iff >=1 box, plus a caption
 keyword fallback. No confidence scores are exposed by the model for OVD.
 """
+
 import re
 import time
 from typing import Any
@@ -30,8 +31,9 @@ def tag_phrase(tag: dict) -> str:
 class FlorenceBackend:
     name = "florence-2-large"
 
-    def __init__(self, checkpoint: str = "microsoft/Florence-2-large", device: str | None = None,
-                 dtype: str = "float16"):
+    def __init__(
+        self, checkpoint: str = "microsoft/Florence-2-large", device: str | None = None, dtype: str = "float16"
+    ):
         import torch  # lazy: heavy optional dependency
         from transformers import AutoModelForCausalLM, AutoProcessor
 
@@ -40,8 +42,11 @@ class FlorenceBackend:
             device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         self.device = device
         self.torch_dtype = getattr(torch, dtype) if self.device != "cpu" else torch.float32
-        self.model = AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype=self.torch_dtype,
-                                                          trust_remote_code=True).to(self.device).eval()
+        self.model = (
+            AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype=self.torch_dtype, trust_remote_code=True)
+            .to(self.device)
+            .eval()
+        )
         self.processor = AutoProcessor.from_pretrained(checkpoint, trust_remote_code=True)
         self.name = checkpoint.split("/")[-1].lower()
 
@@ -53,8 +58,13 @@ class FlorenceBackend:
         inputs = self.processor(text=prompt, images=image, return_tensors="pt").to(self.device, self.torch_dtype)
         t0 = time.perf_counter()
         with torch.no_grad():
-            ids = self.model.generate(input_ids=inputs["input_ids"], pixel_values=inputs["pixel_values"],
-                                      max_new_tokens=max_new_tokens, num_beams=3, do_sample=False)
+            ids = self.model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=max_new_tokens,
+                num_beams=3,
+                do_sample=False,
+            )
         out = self.processor.batch_decode(ids, skip_special_tokens=False)[0]
         parsed = self.processor.post_process_generation(out, task=task, image_size=(image.width, image.height))
         return parsed.get(task), time.perf_counter() - t0
@@ -71,8 +81,10 @@ class FlorenceBackend:
         boxes = (res or {}).get("bboxes") or []
         labels = (res or {}).get("bboxes_labels") or []
         w, h = image.width, image.height
-        dets = [{"label": lbl, "bbox": [round(b[0] / w, 4), round(b[1] / h, 4), round(b[2] / w, 4), round(b[3] / h, 4)]}
-                for b, lbl in zip(boxes, labels)]
+        dets = [
+            {"label": lbl, "bbox": [round(b[0] / w, 4), round(b[1] / h, 4), round(b[2] / w, 4), round(b[3] / h, 4)]}
+            for b, lbl in zip(boxes, labels)
+        ]
         return dets, lat
 
     def tagging_via_ovd(self, image, questions_tags: list[dict]) -> dict[str, Any]:
@@ -83,5 +95,10 @@ class FlorenceBackend:
             answers[tag["slug"]] = bool(dets)
             raw[tag["slug"]] = dets
             lat_total += lat
-        return {"answers": answers, "confidence": {}, "latency_s": round(lat_total, 3), "n_calls": len(questions_tags),
-                "raw": raw}
+        return {
+            "answers": answers,
+            "confidence": {},
+            "latency_s": round(lat_total, 3),
+            "n_calls": len(questions_tags),
+            "raw": raw,
+        }

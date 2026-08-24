@@ -1,4 +1,5 @@
 """Dataset access: manifest, reference-model (Gemini) outputs, tag questions, prompts, images on disk."""
+
 import csv
 import io
 import json
@@ -20,7 +21,7 @@ TARGET_KB = 500
 
 @dataclass(frozen=True)
 class Item:
-    image_id: str          # source-DB PKs (UUID strings)
+    image_id: str  # source-DB PKs (UUID strings)
     url: str
     s3_url: str
     image_type: str
@@ -34,7 +35,8 @@ def load_manifest(path: Path = DATA / "manifest.csv") -> list[Item]:
     if not path.exists():
         raise SystemExit(
             f"{path} not found. Create it first: scripts/export_staging_dataset.py against the source DB, "
-            "or scripts/smoke_manifest.py <dir> <indoor|outdoor> for a local smoke test.")
+            "or scripts/smoke_manifest.py <dir> <indoor|outdoor> for a local smoke test."
+        )
     with path.open() as fh:
         return [Item(str(r["image_id"]), r["url"], r["s3_url"], r["image_type"]) for r in csv.DictReader(fh)]
 
@@ -106,7 +108,7 @@ def download_all(items: list[Item], *, force: bool = False, timeout: float = 30.
                 done += 1
                 if done % 50 == 0:
                     print(f"  downloaded {done}...", flush=True)
-            except (httpx.HTTPError, OSError) as exc:  # noqa: PERF203
+            except (httpx.HTTPError, OSError) as exc:
                 failed.append(it.image_id)
                 print(f"download failed image_id={it.image_id}: {exc}")
     return done, failed

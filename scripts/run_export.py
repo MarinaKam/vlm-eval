@@ -5,15 +5,16 @@
 Needs VLM_EVAL_SOURCE_REPO (see .env.example). Prints which DB host is used (no password) before running.
 READ-ONLY export.
 """
+
 import os
 import subprocess
 import sys
+import sys as _sys
 from pathlib import Path
 from urllib.parse import urlparse
 
-import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from vlm_eval.config import source_repo  # noqa: E402
+from vlm_eval.config import source_repo
 
 SOURCE = source_repo()
 EXPORT = Path(__file__).resolve().parent / "export_staging_dataset.py"
@@ -28,5 +29,4 @@ for line in (SOURCE / ".env").read_text().splitlines():
 u = urlparse(os.environ["DATABASE_URL"])
 print(f"DB: host={u.hostname} db={u.path.lstrip('/')} user={u.username}", flush=True)
 with EXPORT.open() as stdin:
-    sys.exit(subprocess.call([str(SOURCE / ".venv/bin/python"), "manage.py", "shell"],
-                             cwd=SOURCE, stdin=stdin))
+    sys.exit(subprocess.call([str(SOURCE / ".venv/bin/python"), "manage.py", "shell"], cwd=SOURCE, stdin=stdin))

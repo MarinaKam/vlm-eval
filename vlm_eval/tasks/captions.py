@@ -3,6 +3,7 @@
 One call per image, all caption prompts at once, JSON object with one string per prompt key.
 Gemini config: temperature 0.2, max_output_tokens 8000.
 """
+
 import json
 from typing import Any
 

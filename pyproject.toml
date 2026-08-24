@@ -26,5 +26,8 @@ packages = ["vlm_eval"]
 [tool.ruff]
 line-length = 120
 
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "PERF", "RUF100"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

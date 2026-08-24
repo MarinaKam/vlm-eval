@@ -6,7 +6,7 @@ from typing import Any, Protocol
 class Response:
     text: str
     latency_s: float
-    usage: dict[str, int] = field(default_factory=dict)          # prompt_tokens / completion_tokens
+    usage: dict[str, int] = field(default_factory=dict)  # prompt_tokens / completion_tokens
     logprobs: list[tuple[str, float, dict[str, float]]] | None = None
     raw: Any = None
 

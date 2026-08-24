@@ -7,10 +7,12 @@ Reference implementation (the source app's gemini/classification.py):
   * response_schema: object with a required boolean per slug; temperature 0
   * confidence: fake (random 0.7-0.9) — here we instead read P(true) from token logprobs when available
 """
+
 import json
 import math
 import re
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 CATEGORY_ORDER = {"common": 0, "indoor": 1, "outdoor": 2}
 
@@ -31,12 +33,10 @@ def chunk_questions(questions: dict[str, str], chunk_size: int, individual: Iter
     """
     keys = list(questions)
     size = len(keys) if chunk_size <= 0 else chunk_size
-    chunks = [{k: questions[k] for k in keys[i:i + size]} for i in range(0, len(keys), size)]
+    chunks = [{k: questions[k] for k in keys[i : i + size]} for i in range(0, len(keys), size)]
     singles = []
     for chunk in chunks:
-        for slug in individual:
-            if slug in chunk:
-                singles.append({slug: chunk.pop(slug)})
+        singles.extend({slug: chunk.pop(slug)} for slug in individual if slug in chunk)
     return [c for c in chunks if c] + singles
 
 
@@ -67,7 +67,7 @@ def _loads_lenient(text: str) -> dict | None:
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start:
         try:
-            obj = json.loads(text[start:end + 1])
+            obj = json.loads(text[start : end + 1])
             return obj if isinstance(obj, dict) else None
         except json.JSONDecodeError:
             return None
@@ -93,8 +93,9 @@ def parse_answers(text: str, slugs: Iterable[str]) -> dict[str, bool | None]:
     return {slug: _to_bool(obj.get(slug)) for slug in slugs}
 
 
-def confidence_from_logprobs(tokens: list[tuple[str, float, dict[str, float]]],
-                             slugs: Iterable[str]) -> dict[str, float]:
+def confidence_from_logprobs(
+    tokens: list[tuple[str, float, dict[str, float]]], slugs: Iterable[str]
+) -> dict[str, float]:
     """P(true) per slug from a token stream [(token_text, logprob, {top_token: logprob})].
 
     Walk the emitted text; right after `"<slug>":` the next non-whitespace token is the boolean value.
