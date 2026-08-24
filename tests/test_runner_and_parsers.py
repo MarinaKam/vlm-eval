@@ -27,7 +27,11 @@ def test_run_over_items_resumes_and_repeats(tmp_path):
 def test_caption_prompt_and_parse():
     p = {"base_caption": "short", "detailed_caption": "long"}
     txt = captions.prompt_text(p)
-    assert txt.startswith("You are a helpful SEO expert in the real estate area.")
+    # No domain in the code: without an exported header the opening line is generic.
+    assert txt.startswith("You are an assistant that describes images.")
+    # With one, production's own wording is replayed verbatim.
+    themed = captions.prompt_text(p, {"caption_header": "You are an SEO expert in real estate."})
+    assert themed.startswith("You are an SEO expert in real estate.")
     assert txt.endswith("base_caption: short\ndetailed_caption: long")
     assert captions.schema(p)["required"] == ["base_caption", "detailed_caption"]
     parsed = captions.parse('{"base_caption": " a ", "detailed_caption": null}', p)

@@ -73,6 +73,9 @@ print(
 _active_prompts = Prompt.objects.select_related("key").filter(key__is_active=True)
 caption_prompts = {p["key__slug"]: p["text"] for p in _active_prompts.values("key__slug", "text")}
 templates = {t["slug"]: t["text"] for t in PromptTemplate.objects.filter(is_active=True).values("slug", "text")}
+# The opening line of the caption prompt belongs to the pipeline, not to the harness. Export it so the
+# tool has no domain wording of its own; adjust the source if yours lives elsewhere.
+templates.setdefault("caption_header", "You are a helpful SEO expert in the real estate area.")
 configs = {
     c["key"]: {k: v for k, v in c.items() if k != "key" and v is not None}
     for c in ProcessingConfig.objects.filter(is_active=True).values(

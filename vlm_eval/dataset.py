@@ -13,7 +13,8 @@ from .config import DATA, ROOT  # noqa: F401  (ROOT re-exported for callers)
 
 IMAGES = DATA / "images"
 
-# same resize/compress defaults as the production pipeline (max_dimension 1536, JPEG q85, target 500 KB)
+# Resize/compress settings are read from the export (see pipeline_config); these are only the
+# fallbacks for a dataset exported before they were captured.
 MAX_DIM = 1536
 JPEG_Q = 85
 TARGET_KB = 500
@@ -108,8 +109,20 @@ def image_size(data: bytes) -> tuple[int, int]:
     return PILImage.open(io.BytesIO(data)).size
 
 
-def download_all(items: list[Item], *, force: bool = False, timeout: float = 30.0) -> tuple[int, list[int]]:
-    """Fetch s3_url -> data/images/<id>.jpg (optimized). Returns (downloaded, failed_ids)."""
+def download_all(
+    items: list[Item],
+    *,
+    force: bool = False,
+    timeout: float = 30.0,
+    reencode: bool = False,
+) -> tuple[int, list[str]]:
+    """Fetch each image to data/images/<id>.jpg. Returns (downloaded, failed_ids).
+
+    By default the bytes are stored exactly as served. Production uploads its images *already* resized
+    and compressed, so re-encoding them here would add a second generation of JPEG loss and hand the
+    models slightly different pixels than the reference model saw — the opposite of what this tool
+    claims. Pass `reencode=True` only for a source that serves originals.
+    """
     IMAGES.mkdir(parents=True, exist_ok=True)
     done, failed = 0, []
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
@@ -119,7 +132,7 @@ def download_all(items: list[Item], *, force: bool = False, timeout: float = 30.
             try:
                 r = client.get(it.s3_url or it.url)
                 r.raise_for_status()
-                it.path.write_bytes(optimize(r.content))
+                it.path.write_bytes(optimize(r.content) if reencode else r.content)
                 done += 1
                 if done % 50 == 0:
                     print(f"  downloaded {done}...", flush=True)

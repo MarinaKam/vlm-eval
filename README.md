@@ -29,7 +29,7 @@ Every step writes plain files, and every step can be interrupted and resumed.
 uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
 source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
-.venv/bin/pytest                                       # 40 tests including end-to-end
+.venv/bin/pytest                                       # 46 tests including end-to-end
 ```
 
 `.env` holds everything machine-specific. It is gitignored, as are `data/`, `runs/` and `reports/`.
@@ -64,9 +64,15 @@ vlm-eval download
 vlm-eval status      # what is measured so far, what is still missing
 ```
 
-**Why:** models are fed local files, resized and compressed exactly the way production does it, so every
-model sees the same pixels the reference API saw. Also fetches the listing images needed for
-multi-image summaries — those are a separate set from the sampled manifest.
+**Why:** every model must see the same pixels the reference API saw. Production uploads its images
+already resized and compressed, so they are stored **byte-for-byte as served** — re-encoding them here
+would add a second generation of JPEG loss and quietly change the comparison. (`reencode=True` exists
+for a source that serves originals.) The command also fetches listing images for multi-image summaries,
+which are a separate set from the sampled manifest.
+
+`vlm-eval status` then prints the pipeline settings the harness will replay — batch size, which tags are
+asked alone, image dimensions and quality — all read from the export, and flagged loudly if any had to
+be guessed.
 
 ---
 
@@ -107,9 +113,17 @@ vlm-eval hf paligemma tagging --limit 150   # ~6 GB, gated repo: accept the lice
 Florence-2 defaults to the `florence-community/*` port: the original `microsoft/*` repos ship custom
 code that no longer runs on current transformers.
 
-Batch scripts for a full sweep: `scripts/run_all_local.sh` (Ollama models),
-`scripts/run_hf_models.sh` (transformers models), `scripts/finish_minimal.sh` (a short top-up when you
-need every capability measured but not at full sample size).
+To run everything for one model, in one command:
+
+```bash
+vlm-eval sweep qwen3                             # all tasks, sensible sample sizes
+vlm-eval sweep qwen3 --tagging 1000 --captions 500
+vlm-eval sweep qwen3 --captions 0 --grounding 0  # skip stages with 0
+```
+
+Stages run cheapest first — summary, grounding, captions, all-in-one-call, tagging — so stopping early
+still leaves every capability measured; only the sample size shrinks. It finishes with `metrics` and
+`status`.
 
 **Interrupting is safe.** Results are appended row by row; re-running continues where it stopped.
 
@@ -238,6 +252,29 @@ cost accuracy there. Measure it on the model you actually use.
 Model presets live in `models.json`; measured economics inputs in `data/economics.json`.
 
 ---
+
+## The settings come from your export, never from this code
+
+The claim is "your questions, your batches, your pixels". That only holds if the numbers are read
+rather than assumed, so `data/prompts.json` carries production's own `processing_config` — batch size,
+which tags are asked on their own, image dimensions, JPEG quality, target size — and the harness applies
+those. A constant in this repository that happens to match production today is not evidence: change the
+value in production and a hardcoded harness keeps measuring the old thing without saying so.
+
+If the export is missing a setting, the run **stops** and tells you to re-export. `--allow-defaults`
+overrides that knowingly, and then every guessed value is printed.
+
+The same rule applies to domain content. Nothing about real estate lives in the code:
+
+| what | where it comes from |
+|---|---|
+| tag questions | `data/tags.json` |
+| caption prompts and their opening line | `data/prompts.json` (`caption_header`) |
+| property-summary prompt | `data/prompts.json` (`multi_image_summary`) |
+| what to localise | `data/grounding_targets.json` |
+| batching, image settings | `data/prompts.json` (`processing_config`) |
+
+Run the harness against someone else's `data/` and it asks their questions, not ours.
 
 ## Why the design is the way it is
 
