@@ -38,7 +38,7 @@ vlm_eval/
   review.py    HTML page to eyeball cases where model and reference disagree,
                so a human decides who was right — the reference API is not infallible
   report.py    renders the markdown tables
-scripts/       dataset export from your Django app's DB, batch run scripts
+scripts/       example dataset export (written for a Django app — see note below), batch run scripts
 ```
 
 ## Setup
@@ -82,6 +82,19 @@ Models with no server (Florence-2, InternVL, PaliGemma) run directly:
 .venv/bin/vlm-eval hf --backend internvl  --task tagging --limit 150
 .venv/bin/vlm-eval hf --backend paligemma --task tagging --limit 150   # gated repo: HF_TOKEN needed
 ```
+
+## Bring your own dataset
+
+The harness itself doesn't care where the data comes from — it only reads plain files in `data/`:
+`manifest.csv` (image id, local path, indoor/outdoor), `tags.json` (the yes/no questions),
+`prompts.json` (caption/summary prompt texts), `gemini_tags.jsonl` + `gemini_captions.jsonl`
+(the reference answers), `properties.jsonl` (image groups for the multi-image summary).
+
+`scripts/export_staging_dataset.py` is one way to produce those files — it's written for a Django app
+with a particular schema, so on any other stack (or another schema) treat it as a template: produce the
+same six files with whatever tooling your backend has, and everything downstream works unchanged.
+`scripts/smoke_manifest.py` builds a minimal `manifest.csv` from a folder of JPEGs if you just want to
+try the harness without any export.
 
 ## Why the design is the way it is
 
