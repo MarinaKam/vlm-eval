@@ -52,6 +52,12 @@ class RunFingerprint:
     # a git SHA — editing a report or a docstring elsewhere must not refuse a resume, but editing the
     # code that builds requests or parses answers must.
     code: str = ""
+    # The weights themselves. A served name like `qwen3-vl:8b` is a mutable tag: pull an update and the
+    # same name answers with a different model. Ollama's manifest digest / an HF revision are the
+    # immutable identities; a backend that cannot prove one records `unknown: <why>`, and an unknown
+    # identity refuses to resume a non-empty file — the one thing resume must never do is assume the
+    # model stayed the same because its name did.
+    model_identity: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
     def digest(self) -> str:
@@ -73,6 +79,10 @@ class Provenance:
     @property
     def trustworthy(self) -> bool:
         return self.status == VERIFIED
+
+
+def _unproven(identity: str) -> bool:
+    return not identity or identity.startswith("unknown")
 
 
 def code_identity(modules: list) -> str:
@@ -164,6 +174,15 @@ def check(run_file: Path, fp: RunFingerprint, *, log=print) -> None:
             f"      the file: mv {run_file} {run_file}.legacy"
         )
         return
+
+    if previous.fingerprint.digest() == fp.digest() and _unproven(fp.model_identity) and _count_rows(run_file):
+        raise SystemExit(
+            f"{run_file.name} has rows, and the backend cannot prove the model weights are unchanged "
+            f"({fp.model_identity}).\nA served name is a mutable tag — the same name may now answer "
+            "with different weights, and resuming would mix two models in one file. Either\n"
+            f"  archive it:  mv {run_file} {run_file}.old  (and {sidecar(run_file).name})\n"
+            "  or use a backend that reports an immutable model digest."
+        )
 
     if previous.fingerprint.digest() != fp.digest():
         raise SystemExit(

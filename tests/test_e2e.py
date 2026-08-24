@@ -1008,7 +1008,12 @@ def test_resume_refuses_to_mix_results_from_different_settings(tmp_path, capsys)
 
     run_file = tmp_path / "tagging_chunk15.jsonl"
     before = provenance.RunFingerprint(
-        task="tagging", served_name="qwen3-vl:8b", chunk_size=15, extra_output_tokens=0, prompt_digest="aaa"
+        task="tagging",
+        served_name="qwen3-vl:8b",
+        chunk_size=15,
+        extra_output_tokens=0,
+        prompt_digest="aaa",
+        model_identity="ollama:901c",
     )
     provenance.check(run_file, before)  # first run: records what produced it
     run_file.write_text('{"image_id": "a"}\n')
@@ -1019,7 +1024,12 @@ def test_resume_refuses_to_mix_results_from_different_settings(tmp_path, capsys)
     assert "" == capsys.readouterr().out
 
     after = provenance.RunFingerprint(
-        task="tagging", served_name="qwen3-vl:8b", chunk_size=15, extra_output_tokens=3000, prompt_digest="aaa"
+        task="tagging",
+        served_name="qwen3-vl:8b",
+        chunk_size=15,
+        extra_output_tokens=3000,
+        prompt_digest="aaa",
+        model_identity="ollama:901c",
     )
     with pytest.raises(SystemExit) as e:
         provenance.check(run_file, after)
@@ -1029,7 +1039,12 @@ def test_resume_refuses_to_mix_results_from_different_settings(tmp_path, capsys)
 
     # A reworded question counts too — the answers mean something different.
     reworded = provenance.RunFingerprint(
-        task="tagging", served_name="qwen3-vl:8b", chunk_size=15, extra_output_tokens=0, prompt_digest="bbb"
+        task="tagging",
+        served_name="qwen3-vl:8b",
+        chunk_size=15,
+        extra_output_tokens=0,
+        prompt_digest="bbb",
+        model_identity="ollama:901c",
     )
     with pytest.raises(SystemExit) as e:
         provenance.check(run_file, reworded)
@@ -1041,7 +1056,7 @@ def test_a_file_from_before_fingerprinting_says_so_rather_than_guessing(tmp_path
 
     run_file = tmp_path / "old.jsonl"
     run_file.write_text('{"image_id": "a"}\n')  # rows, no sidecar
-    fp = provenance.RunFingerprint(task="tagging", served_name="m", chunk_size=15)
+    fp = provenance.RunFingerprint(task="tagging", served_name="m", chunk_size=15, model_identity="ollama:901c")
     provenance.check(run_file, fp)
     out = capsys.readouterr().out
     assert "before runs recorded their settings" in out and "legacy_unknown" in out
@@ -1296,6 +1311,7 @@ def test_resume_with_identical_settings_appends_nothing_and_keeps_the_sidecar(wo
     from vlm_eval import provenance, runner
 
     be = StubBackend({"pool"})
+    be.weights_digest = "stub:deadbeef"
     cfg = runner.RunConfig(model="stub", chunk_size=15, individual=[])
     cli.run_task(be, task="tagging", model="stub", cfg=cfg)
 
@@ -1315,7 +1331,7 @@ def test_resume_refuses_a_different_server_route_or_implementation(tmp_path):
     from vlm_eval import provenance
 
     run_file = tmp_path / "tagging_chunk15.jsonl"
-    base = dict(task="tagging", served_name="qwen3", chunk_size=15, prompt_digest="x")
+    base = dict(task="tagging", served_name="qwen3", chunk_size=15, prompt_digest="x", model_identity="ollama:901c")
     provenance.check(run_file, provenance.RunFingerprint(**base, route="ollama@http://127.0.0.1:11434/v1", code="aaa"))
     run_file.write_text('{"image_id": "a"}\n')
 
@@ -1345,3 +1361,41 @@ def test_code_identity_tracks_the_answer_producing_source(tmp_path):
 
     f.write_text("def parse(x): return x.lower()\n")
     assert provenance.code_identity([mod]) != before
+
+
+def test_same_name_same_route_different_weights_refuses_resume(tmp_path):
+    """`qwen3-vl:8b` is a tag somebody can re-point: pull an update and the same name on the same
+    server answers with a different model. The digest of the weights is the identity; the name is not."""
+    from vlm_eval import provenance
+
+    run_file = tmp_path / "tagging_chunk15.jsonl"
+    base = dict(task="tagging", served_name="qwen3-vl:8b", chunk_size=15, prompt_digest="x", route="ollama@http://o/v1")
+    provenance.check(run_file, provenance.RunFingerprint(**base, model_identity="ollama:901cae"))
+    run_file.write_text('{"image_id": "a"}\n')
+
+    with pytest.raises(SystemExit) as e:
+        provenance.check(run_file, provenance.RunFingerprint(**base, model_identity="ollama:f00d42"))
+    assert "model_identity" in str(e.value) and "ollama:f00d42" in str(e.value)
+
+
+def test_unprovable_weights_refuse_resume_but_allow_a_fresh_run(tmp_path):
+    """A backend that cannot prove its weights still gets to run — but never to resume rows it cannot
+    vouch for. Resume's one forbidden move is assuming the model stayed the same because its name did."""
+    from vlm_eval import provenance
+
+    run_file = tmp_path / "captions.jsonl"
+    fp = provenance.RunFingerprint(
+        task="captions",
+        served_name="m",
+        chunk_size=15,
+        model_identity="unknown: backend does not report a weights digest",
+    )
+    provenance.check(run_file, fp)  # fresh file: allowed, recorded honestly
+
+    provenance.check(run_file, fp)  # still empty: nothing to vouch for, still allowed
+
+    run_file.write_text('{"image_id": "a"}\n')
+    with pytest.raises(SystemExit) as e:
+        provenance.check(run_file, fp)
+    msg = str(e.value)
+    assert "cannot prove the model weights are unchanged" in msg and "mutable tag" in msg

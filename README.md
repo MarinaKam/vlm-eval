@@ -225,7 +225,11 @@ means:
   settings; the server route (`flavor@base_url` — two servers answering to one served name are two
   experiments); a digest of the answer-producing source (the runner, the task module, the backend —
   deliberately not a git SHA, so editing a report cannot refuse a resume but editing a parser must);
-  for throughput runs, also the hardware and concurrency, without which the number is meaningless.
+  for throughput runs, also the hardware and concurrency, without which the number is meaningless;
+- **the weights themselves** — a served name like `qwen3-vl:8b` is a mutable tag: pull an update and
+  the same name answers with a different model. Ollama's manifest digest and the HF commit are the
+  immutable identities; a backend that cannot prove one is recorded as `unknown` and may run fresh
+  files but never resume non-empty ones.
 
 Change any of it and the next run stops and names what changed; archive the file or pick another run
 name. Every backend goes through the same gate — a served model, Florence-2, PaliGemma, a throughput

@@ -96,6 +96,8 @@ This is an evaluation tool; a wrong number is worse than no number.
   digest and refuses every resume, so batch such changes between sweeps, never during one.
 - **Truncation and failure are read from the `completion` record**, never by matching error-message
   text. If a new task variant writes rows, it writes `completion_record(...)` too.
+- **A model name is not a model.** The fingerprint stores the weights digest (Ollama manifest / HF
+  commit); a backend that cannot prove one records `unknown` and is refused resume of non-empty files.
 - **`legacy_unknown` is permanent.** Nothing may promote a pre-provenance file to verified; if a clean
   measurement is needed, the file is archived and recomputed.
 

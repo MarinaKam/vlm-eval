@@ -151,6 +151,36 @@ def _route(be) -> str:
     return f"in-process/{device}" if device else ""
 
 
+def _model_identity(be) -> str:
+    """The immutable identity of the weights, when the backend can prove one.
+
+    A served name is a tag somebody can re-point. Ollama's /api/tags carries the manifest digest of
+    what the name resolves to right now; a transformers checkpoint carries the HF commit it was loaded
+    from. Anything else is `unknown` — recorded honestly, and an unknown identity refuses to resume a
+    non-empty file.
+    """
+    declared = getattr(be, "weights_digest", None)  # a backend (or a test stub) may state it directly
+    if declared:
+        return str(declared)
+    commit = getattr(getattr(getattr(be, "model", None), "config", None), "_commit_hash", None)
+    if commit:
+        return f"hf:{getattr(be, 'checkpoint', '')}@{commit}"
+    if getattr(be, "flavor", "") == "ollama":
+        import httpx
+
+        base = be.base_url
+        root = base[: -len("/v1")] if base.endswith("/v1") else base
+        try:
+            models = httpx.get(root + "/api/tags", timeout=10).json().get("models", [])
+        except Exception as exc:
+            return f"unknown: /api/tags unreachable ({type(exc).__name__})"
+        for m in models:
+            if be.model in (m.get("name"), m.get("model")):
+                return f"ollama:{m['digest']}"
+        return f"unknown: {be.model!r} not in /api/tags"
+    return "unknown: backend does not report a weights digest"
+
+
 def _code_identity(task: str, be) -> str:
     """The source that builds this task's requests and parses its answers."""
     import importlib
@@ -187,6 +217,7 @@ def _fingerprint(
         images_digest=dataset.images_digest(images),
         route=_route(be),
         code=_code_identity(task, be),
+        model_identity=_model_identity(be),
         extra=extra or {},
     )
 
