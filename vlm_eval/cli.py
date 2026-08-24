@@ -766,6 +766,10 @@ def cmd_sweep(a) -> None:
             workers=a.workers,
             limit=opts.get("limit"),
             no_logprobs=a.no_logprobs,
+            # `_resolve` already renamed a.model to the preset's run_name, so the stage's own
+            # `_resolve` cannot find the preset again — everything the stage needs must be handed
+            # over here. Leaving this out once sent grounding back to its bare 512-token budget.
+            extra_output_tokens=a.extra_output_tokens,
         )
         cmd_run(run_args)
 

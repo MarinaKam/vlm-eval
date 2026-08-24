@@ -1399,3 +1399,38 @@ def test_unprovable_weights_refuse_resume_but_allow_a_fresh_run(tmp_path):
         provenance.check(run_file, fp)
     msg = str(e.value)
     assert "cannot prove the model weights are unchanged" in msg and "mutable tag" in msg
+
+
+def test_sweep_hands_the_token_budget_to_every_stage(workspace, monkeypatch):
+    """`_resolve` renames the model to its run_name, so a stage cannot re-find the preset — the sweep
+    must hand over everything itself. This exact miss once sent grounding back to a 512-token budget
+    mid-sweep, reproducing the truncation the budget existed to fix."""
+    import argparse
+
+    import vlm_eval.cli as cli
+
+    seen = []
+    monkeypatch.setattr(cli, "cmd_run", lambda a: seen.append((a.task, a.extra_output_tokens)))
+    monkeypatch.setattr(cli, "cmd_metrics", lambda a: None)
+    monkeypatch.setattr(cli, "cmd_status", lambda a: None)
+    monkeypatch.setattr(cli, "_presets", lambda: {"m": {"run_name": "m-run", "extra_output_tokens": 3000}})
+
+    cli.cmd_sweep(
+        argparse.Namespace(
+            model="m",
+            served_name="s",
+            base_url="http://x/v1",
+            flavor="ollama",
+            coords="norm1000",
+            via="server",
+            workers=1,
+            no_logprobs=True,
+            grounding=1,
+            captions=1,
+            chunk_all=1,
+            tagging=1,
+            consistency=1,
+            extra_output_tokens=None,  # not given on the command line: must come from the preset
+        )
+    )
+    assert seen and all(extra == 3000 for _, extra in seen), seen
