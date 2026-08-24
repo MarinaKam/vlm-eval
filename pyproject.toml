@@ -2,6 +2,8 @@
 name = "vlm-eval"
 version = "0.1.0"
 description = "Evaluate self-hosted open-weight vision-language models against a production Gemini CV pipeline"
+authors = [{ name = "Maryna Kamysheva" }]
+license = { text = "MIT" }
 requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.27",

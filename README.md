@@ -133,3 +133,7 @@ The tag questions and prompt texts live only in your DB and in `data/` — they 
 - Ollama doesn't expose logprobs, so confidence comes only from vLLM-served runs.
 - Cost estimates are "GPU-hours at measured throughput × the card's hourly price" — real bills add
   idle time, autoscaling headroom and egress.
+
+## Author
+
+[Maryna Kamysheva](https://github.com/MarinaKam) · MIT licence
