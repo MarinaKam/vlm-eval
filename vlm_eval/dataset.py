@@ -31,7 +31,10 @@ class Item:
         return IMAGES / f"{self.image_id}.jpg"
 
 
-def load_manifest(path: Path = DATA / "manifest.csv") -> list[Item]:
+def load_manifest(path: Path | None = None) -> list[Item]:
+    # Resolved on call, not at import: a default bound at import time would ignore VLM_EVAL_DATA_DIR
+    # and quietly read the wrong directory.
+    path = path or DATA / "manifest.csv"
     if not path.exists():
         raise SystemExit(
             f"{path} not found. Create it first: scripts/export_staging_dataset.py against the source DB, "
@@ -47,7 +50,8 @@ def load_tags(path: Path | None = None, *, active_only: bool = True) -> list[dic
     return [t for t in tags if t.get("is_active", True)] if active_only else tags
 
 
-def load_prompts(path: Path = DATA / "prompts.json") -> dict:
+def load_prompts(path: Path | None = None) -> dict:
+    path = path or DATA / "prompts.json"
     if not path.exists():
         return {"caption_prompts": {}, "prompt_templates": {}, "processing_config": {}}
     return json.loads(path.read_text())
@@ -60,12 +64,13 @@ def load_jsonl(path: Path) -> list[dict]:
         return [json.loads(line) for line in fh if line.strip()]
 
 
-def gemini_tags_by_image(path: Path = DATA / "gemini_tags.jsonl") -> dict[str, dict]:
-    return {str(row["image_id"]): row for row in load_jsonl(path)}
+def gemini_tags_by_image(path: Path | None = None) -> dict[str, dict]:
+    return {str(row["image_id"]): row for row in load_jsonl(path or DATA / "gemini_tags.jsonl")}
 
 
-def property_items(path: Path = DATA / "properties.jsonl") -> list[Item]:
+def property_items(path: Path | None = None) -> list[Item]:
     """Every image belonging to an exported listing, as downloadable Items (deduplicated)."""
+    path = path or DATA / "properties.jsonl"
     out: dict[str, Item] = {}
     for row in load_jsonl(path):
         for image_id, url in zip(row["image_ids"], row.get("s3_urls") or []):

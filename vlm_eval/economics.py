@@ -19,6 +19,19 @@ HOURS_PER_MONTH = 730
 
 
 @dataclass(frozen=True)
+class Hosting:
+    """One way to run the model. `always_on` bills for the whole month regardless of volume — a
+    dedicated node, or a pod that must stay warm. Otherwise you pay for the hours the work takes,
+    which only works if the pipeline tolerates a cold start."""
+
+    name: str
+    usd_per_hour: float
+    always_on: bool = False
+    cold_start_min: float | None = None
+    note: str = ""
+
+
+@dataclass(frozen=True)
 class Inputs:
     api_cost_per_image: float  # measured, current settings
     api_cost_per_image_optimized: float | None = None  # measured, cheaper settings (if tested)
@@ -28,6 +41,9 @@ class Inputs:
     peak_hour_images: int | None = None
     busy_hours_pct: float | None = None
     gpu_name: str = "L4 (spot)"
+    hosting: list[Hosting] = field(default_factory=list)
+    weights_gb: float | None = None  # model weights parked in object storage
+    storage_usd_per_gb_month: float = 0.02  # standard regional object storage
 
 
 def monthly_gpu_cost(images_per_month: float, inp: Inputs) -> float:
@@ -53,6 +69,56 @@ def peak_analysis(inp: Inputs) -> dict[str, Any] | None:
         "gpus_to_absorb_in_one_hour": max(1, round(hours_for_one_gpu)),
         "busy_hours_pct": inp.busy_hours_pct,
     }
+
+
+def hosting_cost(images_per_month: float, h: Hosting, inp: Inputs) -> float:
+    """Monthly cost of one hosting option at a given volume."""
+    if h.always_on:
+        return h.usd_per_hour * HOURS_PER_MONTH
+    hours = images_per_month / inp.gpu_images_per_hour
+    return min(hours, HOURS_PER_MONTH) * h.usd_per_hour
+
+
+def storage_cost(inp: Inputs) -> float | None:
+    """Keeping the weights in object storage — small, but it is not zero."""
+    if inp.weights_gb is None:
+        return None
+    return inp.weights_gb * inp.storage_usd_per_gb_month
+
+
+def hosting_table(inp: Inputs) -> str:
+    """Compare hosting options across the volume scenarios."""
+    if not inp.hosting or not inp.scenarios:
+        return ""
+    head = [
+        "| hosting option | $/hour | " + " | ".join(f"{lbl} ({v:,}/mo)" for lbl, v in inp.scenarios) + " |",
+        "|---|---|" + "---|" * len(inp.scenarios),
+    ]
+    body = []
+    for h in inp.hosting:
+        cells = [f"${hosting_cost(v, h, inp) * 12:,.0f}/yr" for _, v in inp.scenarios]
+        body.append(f"| {h.name} | ${h.usd_per_hour:.4f} | " + " | ".join(cells) + " |")
+    api = [
+        "| **the API (no hosting)** | — | "
+        + " | ".join(f"${v * inp.api_cost_per_image * 12:,.0f}/yr" for _, v in inp.scenarios)
+        + " |"
+    ]
+    notes = [f"- **{h.name}** — {h.note}" for h in inp.hosting if h.note]
+    cold = [
+        f"- **{h.name}** needs ~{h.cold_start_min:g} min to come up from cold." for h in inp.hosting if h.cold_start_min
+    ]
+    out = ["", "## Where to run it", "", *head, *body, *api]
+    if notes or cold:
+        out += ["", *notes, *cold]
+    stor = storage_cost(inp)
+    if stor is not None:
+        out += [
+            "",
+            f"Keeping {inp.weights_gb:g} GB of weights in object storage adds ${stor:.2f}/month "
+            f"(${stor * 12:.2f}/year) — negligible next to compute, but it is where the weights live "
+            "and it is what makes a cold start reproducible.",
+        ]
+    return "\n".join(out)
 
 
 def rows(inp: Inputs) -> list[dict[str, Any]]:
@@ -143,6 +209,10 @@ def render(inp: Inputs, *, currency_note: str = "") -> str:
                 f"With work in only {inp.busy_hours_pct}% of hours, capacity sized for the peak "
                 f"would sit idle over {100 - inp.busy_hours_pct:.0f}% of the time."
             )
+
+    table = hosting_table(inp)
+    if table:
+        lines.append(table)
 
     if biggest:
         s = biggest["saving_year"]

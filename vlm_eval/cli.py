@@ -9,6 +9,12 @@
   vlm-eval compare qwen3 qwen2.5        comparison table      -> reports/comparison.md
   vlm-eval economics                    self-host vs API      -> reports/economics.md
 
+Measuring the inputs for that last one:
+
+  vlm-eval export                       build the dataset from your database
+  vlm-eval volume [--db-from prod.env]  images per month, busiest hour
+  vlm-eval cost --chunks 15 47          API cost per image at each batch size, and what changes
+
 Any preset field can be overridden with a flag (--served-name, --base-url, --flavor, --coords), and a
 name that is not a preset is used as-is.
 """
@@ -383,6 +389,109 @@ def cmd_hf(a) -> None:
     cmd_metrics(subprocess_metrics)
 
 
+def _script(name: str, *args: str) -> int:
+    """Run one of the scripts/ helpers with this interpreter."""
+    import subprocess
+
+    return subprocess.call([sys.executable, str(dataset.ROOT / "scripts" / name), *args])
+
+
+def cmd_export(a) -> None:
+    """Build the dataset from the source application's database (read-only)."""
+    sys.exit(_script("run_export.py"))
+
+
+def cmd_volume(a) -> None:
+    """How many images per month actually go through, and how bursty the traffic is."""
+    args = ["shell", "--stdin", str(dataset.ROOT / "scripts" / "count_volume.py")]
+    if a.db_from:
+        args = ["shell", "--db-from", a.db_from, "--stdin", str(dataset.ROOT / "scripts" / "count_volume.py")]
+    sys.exit(_script("run_source_manage.py", *args))
+
+
+def _read_cost_csv(path):
+    """(tags per image, mean cost, mean calls, mean prompt tokens) from a cost-measurement CSV."""
+    import csv
+
+    tags, cost, calls, prompt = {}, [], [], []
+    with open(path) as fh:
+        for r in csv.DictReader(fh):
+            key = r.get("image_id") or r["url"]
+            tags[key] = {t.strip() for t in (r.get("classification_tags") or "").split(";") if t.strip()}
+            cost.append(float(r["cost_2_5"]))
+            calls.append(int(r["n_calls"]))
+            prompt.append(int(r["prompt_tokens"]))
+    n = max(len(cost), 1)
+    return tags, sum(cost) / n, sum(calls) / n, sum(prompt) / n
+
+
+def cmd_cost(a) -> None:
+    """Measure what an image costs on the API, at one or more batch sizes, and diff the answers.
+
+    Splitting the questions into chunks re-sends the image with every chunk, which is usually the
+    dominant cost — but bigger batches can change what the model answers. Both halves have to be
+    measured together, or the saving looks free when it is not.
+    """
+    import os
+
+    command = os.environ.get("VLM_EVAL_COST_COMMAND")
+    if not command:
+        sys.exit("VLM_EVAL_COST_COMMAND is not set (see .env.example) — name your app's cost command there")
+
+    urls = dataset.DATA / f"cost_urls_{a.type}.txt"
+    if not urls.exists() or a.refresh:
+        _script("make_cost_urls.py", "--type", a.type, "--limit", str(a.images))
+
+    results = {}
+    for chunk in a.chunks:
+        out = dataset.DATA / f"cost_chunk{chunk}.csv"
+        if out.exists() and not a.refresh:
+            print(f"chunk {chunk}: reusing {out.name} (--refresh to measure again)")
+        else:
+            print(f"\n=== measuring {a.images} images with {chunk} questions per call ===", flush=True)
+            code = _script(
+                "run_source_manage.py",
+                command,
+                "--urls-file",
+                str(urls),
+                "--out",
+                str(out),
+                "--no-gpu",
+                "--assume-type",
+                a.type,
+                "--chunk-size",
+                str(chunk),
+            )
+            if code != 0:
+                sys.exit(code)
+        results[chunk] = _read_cost_csv(out)
+
+    print(f"\n{'questions/call':>15} {'API calls':>10} {'input tokens':>13} {'$/image':>10}")
+    print("-" * 52)
+    base = results[a.chunks[0]][1]
+    for chunk, (_, cost, calls, prompt) in results.items():
+        delta = f"  ({100 * (cost / base - 1):+.0f}%)" if chunk != a.chunks[0] else ""
+        print(f"{chunk:>15} {calls:>10.1f} {prompt:>13,.0f} {cost:>10.6f}{delta}")
+
+    if len(a.chunks) > 1:
+        first = a.chunks[0]
+        print("\nDoes the answer change?")
+        for chunk in a.chunks[1:]:
+            d = metrics.tagset_agreement(results[first][0], results[chunk][0])
+            print(
+                f"  {first} vs {chunk}: identical on {d['identical_pct']}% of images, "
+                f"{d['jaccard_pct']}% tag agreement ({d['tags_first']} -> {d['tags_second']} tags)"
+            )
+            if d["lost"]:
+                print(f"      lost:   {', '.join(f'{t} x{n}' for t, n in d['lost'])}")
+            if d["gained"]:
+                print(f"      gained: {', '.join(f'{t} x{n}' for t, n in d['gained'])}")
+        print(
+            "\nNote: some of that difference is the API answering differently on a re-run, not the batch"
+            "\nsize. Measure that baseline with the same size twice: vlm-eval cost --chunks 15 --refresh"
+        )
+
+
 def cmd_economics(a) -> None:
     from .economics import Inputs, render
 
@@ -404,8 +513,11 @@ def cmd_economics(a) -> None:
                 indent=2,
             )
         )
+    from .economics import Hosting
+
     cfg = json.loads(path.read_text())
     cfg["scenarios"] = [tuple(x) for x in cfg.get("scenarios", [])]
+    cfg["hosting"] = [Hosting(**h) for h in cfg.get("hosting", [])]
     note = cfg.pop("note", "")
     REPORTS.mkdir(parents=True, exist_ok=True)
     out = REPORTS / "economics.md"
@@ -506,6 +618,26 @@ def main(argv=None) -> None:
     s = sub.add_parser("compare", help="render the comparison table")
     s.add_argument("models", nargs="+")
     s.set_defaults(fn=cmd_compare)
+
+    s = sub.add_parser("export", help="build the dataset from the source app's database")
+    s.set_defaults(fn=cmd_export)
+
+    s = sub.add_parser("volume", help="images per month and how bursty the traffic is")
+    s.add_argument("--db-from", default=None, help="take DATABASE_URL from this env file (e.g. production)")
+    s.set_defaults(fn=cmd_volume)
+
+    s = sub.add_parser("cost", help="API cost per image at one or more batch sizes, and what it changes")
+    s.add_argument(
+        "--chunks",
+        type=int,
+        nargs="+",
+        default=[15],
+        help="questions per API call to try, e.g. --chunks 15 47 (NOT a number of images)",
+    )
+    s.add_argument("--images", type=int, default=60, help="how many images to measure on")
+    s.add_argument("--type", choices=["indoor", "outdoor"], default="indoor")
+    s.add_argument("--refresh", action="store_true", help="re-measure even if a result file exists")
+    s.set_defaults(fn=cmd_cost)
 
     s = sub.add_parser("economics", help="self-host vs pay-per-call, from measured inputs")
     s.add_argument("--config", default=None, help="default: <data>/economics.json")

@@ -29,7 +29,7 @@ Every step writes plain files, and every step can be interrupted and resumed.
 uv venv --python 3.12 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
 source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
-.venv/bin/pytest                                       # 31 tests, all should pass
+.venv/bin/pytest                                       # 40 tests including end-to-end
 ```
 
 `.env` holds everything machine-specific. It is gitignored, as are `data/`, `runs/` and `reports/`.
@@ -41,7 +41,7 @@ source .venv/bin/activate                              # so `vlm-eval` works wit
 ### Step 1.1 Export from your database
 
 ```bash
-python scripts/run_export.py
+vlm-eval export
 ```
 
 **Why:** the benchmark has to be your own images, and the reference answers have to be what your current
@@ -162,7 +162,7 @@ GPU idles most of the time and costs more.
 ### How much do you actually process?
 
 ```bash
-python scripts/run_source_manage.py shell --stdin scripts/count_volume.py
+vlm-eval volume
 ```
 
 Images per month, busiest days and hours, and what fraction of hours have any work at all. That last
@@ -172,7 +172,7 @@ The session is switched to read-only at the Postgres level first, so an accident
 database error. Safe to point at production:
 
 ```bash
-python scripts/run_source_manage.py shell --db-from /path/to/prod.env --stdin scripts/count_volume.py
+vlm-eval volume --db-from /path/to/prod.env
 ```
 
 ### Is the chunk size justified?
@@ -181,9 +181,25 @@ Production splits the questions into chunks and re-sends the image with each one
 dominant cost. To find out what that costs and what one big call would cost instead:
 
 ```bash
-python scripts/make_cost_urls.py --type indoor --limit 60
-# then run your app's token-measuring command at different chunk sizes and diff the tag sets
+vlm-eval cost --chunks 15 47 --images 60
 ```
+
+`--chunks` is **questions per API call**, not a number of images (`--images` is that). The command
+measures each size and then tells you what the cheaper one changed:
+
+```
+questions/call  API calls  input tokens    $/image
+            15        4.0        10,639   0.001216
+            47        2.0         5,621   0.000707  (-42%)
+
+Does the answer change?
+  15 vs 47: identical on 50% of images, 84.7% tag agreement (81 -> 76 tags)
+      lost: air_conditioning x3, curtains x2, elevator x1
+```
+
+Halving the bill is not free if it drops tags. And part of any difference is simply the API answering
+differently on a re-run — measure that baseline with the same size twice (`--chunks 15 --refresh`)
+before blaming the batch size. Names your app's command via `VLM_EVAL_COST_COMMAND` in `.env`.
 
 ### Put it together: is switching worth it?
 
@@ -193,8 +209,9 @@ vlm-eval economics          # -> reports/economics.md
 
 Reads `data/economics.json` — the numbers you measured above (cost per image, GPU price and throughput,
 volume scenarios, busiest hour) — and writes the whole argument: cost per scenario, the break-even
-volume, what the busiest hour demands of self-hosted capacity, and a verdict. Run it without the config
-and it prints a filled-in example to start from.
+volume, a comparison of **hosting options** (dedicated VM, autoscaled VM, a pod in a cluster you already
+run), what the busiest hour demands of self-hosted capacity, and a verdict. Run it without the config and
+it prints a filled-in example to start from.
 
 The peak matters more than the average. A vendor absorbs a burst invisibly; your own hardware answers it
 either by paying for idle capacity or by delaying the queue.
