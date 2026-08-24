@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Machine/company-specific config — never commit
+.env
+
+# Dataset: exported from a private DB (client images, model outputs, prompt texts) — never commit
+data/
+
+# Run outputs and rendered reports: derived from private data — never commit
+runs/
+reports/
