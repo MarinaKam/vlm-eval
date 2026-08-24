@@ -351,6 +351,9 @@ def test_sweep_runs_every_task_for_any_model(workspace, monkeypatch):
             consistency=0,
             workers=1,
             no_logprobs=True,
+            via="server",
+            checkpoint=None,
+            device=None,
         )
     )
 
@@ -386,6 +389,9 @@ def test_sweep_skips_stages_set_to_zero(workspace, monkeypatch):
             consistency=0,
             workers=1,
             no_logprobs=False,
+            via="server",
+            checkpoint=None,
+            device=None,
         )
     )
     assert called == ["summary"]  # only the stage with no limit to skip
@@ -466,3 +472,54 @@ def test_grounding_targets_have_no_domain_baked_in(tmp_path, monkeypatch):
 
     (tmp_path / "grounding_targets.json").write_text(json.dumps({"fireplace": "fireplace"}))
     assert grounding.load_targets() == {"fireplace": "fireplace"}
+
+
+def test_sweep_covers_models_without_a_server(monkeypatch):
+    """Deleting the shell scripts must not lose Florence/InternVL/PaliGemma: `--via` routes to them,
+    and skips the tasks each architecture cannot do."""
+    import argparse
+
+    from vlm_eval import cli
+
+    seen = []
+    monkeypatch.setattr(cli, "cmd_florence", lambda a: seen.append(("florence", a.task, a.limit)))
+    monkeypatch.setattr(cli, "cmd_hf", lambda a: seen.append((a.backend, a.task, a.limit)))
+    monkeypatch.setattr(cli, "cmd_metrics", lambda a: None)
+    monkeypatch.setattr(cli, "cmd_status", lambda a: None)
+
+    def sweep(via, **over):
+        seen.clear()
+        args = dict(
+            model=via,
+            served_name=None,
+            base_url=None,
+            flavor=None,
+            coords=None,
+            tagging=50,
+            captions=20,
+            grounding=10,
+            chunk_all=0,
+            consistency=0,
+            workers=1,
+            no_logprobs=True,
+            via=via,
+            checkpoint=None,
+            device=None,
+        )
+        args.update(over)
+        cli.cmd_sweep(argparse.Namespace(**args))
+        return [(b, t) for b, t, _ in seen]
+
+    # Florence-2 takes one image at a time -> no property summary
+    assert sweep("florence") == [("florence", "captions"), ("florence", "grounding"), ("florence", "tagging")]
+    # PaliGemma is single-image and single-turn -> no summary, no grounding sweep stage
+    assert sweep("paligemma") == [("paligemma", "captions"), ("paligemma", "tagging")]
+    # InternVL is a full chat model -> everything
+    assert sweep("internvl") == [
+        ("internvl", "summary"),
+        ("internvl", "grounding"),
+        ("internvl", "captions"),
+        ("internvl", "tagging"),
+    ]
+    # a stage set to 0 is skipped here too
+    assert sweep("florence", captions=0) == [("florence", "grounding"), ("florence", "tagging")]

@@ -29,7 +29,7 @@ Every step writes plain files, and every step can be interrupted and resumed.
 uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
 source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
-.venv/bin/pytest                                       # 46 tests including end-to-end
+.venv/bin/pytest                                       # 47 tests including end-to-end
 ```
 
 `.env` holds everything machine-specific. It is gitignored, as are `data/`, `runs/` and `reports/`.
@@ -119,7 +119,14 @@ To run everything for one model, in one command:
 vlm-eval sweep qwen3                             # all tasks, sensible sample sizes
 vlm-eval sweep qwen3 --tagging 1000 --captions 500
 vlm-eval sweep qwen3 --captions 0 --grounding 0  # skip stages with 0
+
+vlm-eval sweep florence --via florence           # models with no server go through transformers
+vlm-eval sweep internvl --via internvl
+vlm-eval sweep paligemma --via paligemma
 ```
+
+`--via` also knows what each architecture cannot do and skips it rather than failing: Florence-2 takes
+one image at a time, so there is no property summary; PaliGemma is single-image and single-turn.
 
 Stages run cheapest first — summary, grounding, captions, all-in-one-call, tagging — so stopping early
 still leaves every capability measured; only the sample size shrinks. It finishes with `metrics` and

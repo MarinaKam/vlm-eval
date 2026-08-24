@@ -442,6 +442,12 @@ def cmd_sweep(a) -> None:
     """
     import argparse as _argparse
 
+    # Models without a server (Florence-2, InternVL, PaliGemma) go through their own commands, and
+    # not all of them do every task: Florence-2 has no multi-image input, PaliGemma is single-turn.
+    if a.via != "server":
+        _sweep_local(a)
+        return
+
     stages = [
         ("summary", {"task": "summary", "limit": None}),
         ("grounding", {"task": "grounding", "limit": a.grounding}),
@@ -473,6 +479,52 @@ def cmd_sweep(a) -> None:
 
     cmd_metrics(_argparse.Namespace(model=a.model))
     cmd_status(_argparse.Namespace())
+
+
+def _sweep_local(a) -> None:
+    """Full run for a transformers-backed model, skipping the tasks its architecture cannot do."""
+    import argparse as _argparse
+
+    if a.via == "florence":
+        supported = [("captions", a.captions), ("grounding", a.grounding), ("tagging", a.tagging)]
+        run = cmd_florence
+        base = {
+            "checkpoint": a.checkpoint or "florence-community/Florence-2-large",
+            "model": a.model if a.model != a.via else None,
+            "device": a.device,
+            "repeats": 1,
+        }
+        note = "Florence-2 takes one image at a time, so there is no property summary."
+    else:
+        supported = [("captions", a.captions), ("tagging", a.tagging)]
+        if a.via == "internvl":
+            supported = [("summary", None), ("grounding", a.grounding), *supported]
+            note = ""
+        else:
+            note = "PaliGemma is single-image and single-turn: no summary, and one call per tag."
+        run = cmd_hf
+        base = {
+            "backend": a.via,
+            "checkpoint": a.checkpoint,
+            "model": a.model if a.model != a.via else None,
+            "device": a.device,
+            "chunk": 15,
+            "repeats": 1,
+        }
+
+    if note:
+        print(note, flush=True)
+    model_name = None
+    for task, limit in supported:
+        if limit == 0:
+            print(f"--- skipping {task}")
+            continue
+        print(f"\n=== {a.via}: {task}" + (f" ({limit} images)" if limit else "") + " ===", flush=True)
+        ns = _argparse.Namespace(task=task, limit=limit, **base)
+        run(ns)
+        model_name = ns.model or model_name
+    if model_name:
+        cmd_metrics(_argparse.Namespace(model=model_name))
 
 
 def cmd_status(a) -> None:
@@ -727,6 +779,14 @@ def main(argv=None) -> None:
     s.add_argument("--workers", type=int, default=1)
     s.add_argument("--no-logprobs", action="store_true")
     s.add_argument("--coords", choices=["abs", "norm1000"], default=None)
+    s.add_argument(
+        "--via",
+        choices=["server", "florence", "internvl", "paligemma"],
+        default="server",
+        help="how to reach the model: an OpenAI-compatible server (default) or transformers",
+    )
+    s.add_argument("--checkpoint", default=None, help="for --via florence|internvl|paligemma")
+    s.add_argument("--device", default=None)
     s.set_defaults(fn=cmd_sweep)
 
     s = sub.add_parser("perf", help="throughput at a given concurrency")
