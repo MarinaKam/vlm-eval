@@ -31,6 +31,11 @@ class Hosting:
     note: str = ""
 
 
+# Values from the example config. If they survive into a real report, nobody measured anything and the
+# conclusion is fiction — so they are refused rather than rendered.
+EXAMPLE_VALUES = {"api_cost_per_image": 0.001, "gpu_usd_per_hour": 1.0, "gpu_images_per_hour": 1000}
+
+
 @dataclass(frozen=True)
 class Inputs:
     api_cost_per_image: float  # measured, current settings
@@ -142,6 +147,18 @@ def rows(inp: Inputs) -> list[dict[str, Any]]:
 
 def _money(x: float | None) -> str:
     return "—" if x is None else f"${x:,.0f}"
+
+
+def check_measured(inp: Inputs) -> list[str]:
+    """Which inputs still look like placeholders rather than measurements."""
+    problems = []
+    if not inp.scenarios:
+        problems.append("no volume scenarios — run `vlm-eval volume` and put real numbers in the config")
+    if inp.api_cost_per_image == EXAMPLE_VALUES["api_cost_per_image"]:
+        problems.append("api_cost_per_image is the example value — run `vlm-eval cost --chunks <N>`")
+    if inp.peak_hour_images is None:
+        problems.append("peak_hour_images is missing — `vlm-eval volume` prints the busiest hour")
+    return problems
 
 
 def render(inp: Inputs, *, currency_note: str = "") -> str:

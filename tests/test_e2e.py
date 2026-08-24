@@ -250,7 +250,7 @@ def test_economics_report_renders_from_config(tmp_path, monkeypatch, capsys):
     (data / "economics.json").write_text(
         json.dumps(
             {
-                "api_cost_per_image": 0.001,
+                "api_cost_per_image": 0.0012,
                 "gpu_usd_per_hour": 1.0,
                 "gpu_images_per_hour": 1000,
                 "peak_hour_images": 4000,
@@ -266,7 +266,7 @@ def test_economics_report_renders_from_config(tmp_path, monkeypatch, capsys):
     )
     cli.main(["economics"])
     md = (reports / "economics.md").read_text()
-    assert "Break-even for a GPU running non-stop: 730,000" in md
+    assert "Break-even for a GPU running non-stop: 608,333" in md
     assert "4 GPUs at once" in md  # 4000 peak / 1000 per hour
     assert "| always on | $1.0000 | $8,760/yr |" in md
     assert "| autoscaled | $1.0000 | $240/yr |" in md
@@ -591,3 +591,24 @@ def test_unknown_model_name_is_used_as_is(monkeypatch):
     )
     cli._resolve(a)
     assert a.model == "whatever" and a.served_name == "x:7b" and a.coords == "norm1000"
+
+
+def test_economics_refuses_placeholder_inputs(tmp_path, monkeypatch, capsys):
+    """A confident report built on example numbers is worse than no report."""
+    from vlm_eval import cli
+
+    data, reports = tmp_path / "data", tmp_path / "reports"
+    data.mkdir()
+    monkeypatch.setattr("vlm_eval.dataset.DATA", data)
+    monkeypatch.setattr(cli, "REPORTS", reports)
+    (data / "economics.json").write_text(json.dumps({"api_cost_per_image": 0.001}))
+
+    with pytest.raises(SystemExit) as e:
+        cli.main(["economics"])
+    message = str(e.value)
+    assert "vlm-eval volume" in message and "vlm-eval cost" in message  # says how to fix each one
+    assert not (reports / "economics.md").exists()
+
+    # Overridden knowingly: it renders, but the file says so on the first line.
+    cli.main(["economics", "--allow-unmeasured"])
+    assert (reports / "economics.md").read_text().startswith("> **UNMEASURED INPUTS")

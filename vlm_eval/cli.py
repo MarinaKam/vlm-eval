@@ -686,7 +686,7 @@ def cmd_cost(a) -> None:
 
 
 def cmd_economics(a) -> None:
-    from .economics import Inputs, render
+    from .economics import Inputs, check_measured, render
 
     path = dataset.DATA / "economics.json" if a.config is None else dataset.ROOT / a.config
     if not path.exists():
@@ -712,10 +712,27 @@ def cmd_economics(a) -> None:
     cfg["scenarios"] = [tuple(x) for x in cfg.get("scenarios", [])]
     cfg["hosting"] = [Hosting(**h) for h in cfg.get("hosting", [])]
     note = cfg.pop("note", "")
+    inputs = Inputs(**cfg)
+    # The arithmetic is trivial; the inputs are the whole point. Rendering a confident report from
+    # placeholder numbers is worse than refusing — it looks like an answer.
+    problems = check_measured(inputs)
+    if problems and not a.allow_unmeasured:
+        sys.exit(
+            "These inputs were never measured:\n  - "
+            + "\n  - ".join(problems)
+            + "\n\nMeasure them first (see the order in the README), or pass --allow-unmeasured to "
+            "render anyway — the report then says so."
+        )
     REPORTS.mkdir(parents=True, exist_ok=True)
     out = REPORTS / "economics.md"
-    out.write_text(render(Inputs(**cfg), currency_note=note))
-    print(f"wrote {out}")
+    warning = ""
+    if problems:
+        warning = "UNMEASURED INPUTS — this report is illustrative only: " + "; ".join(problems)
+    text = render(inputs, currency_note=note)
+    if warning:
+        text = f"> **{warning}**\n\n" + text
+    out.write_text(text)
+    print(f"wrote {out}" + (f"\nWARNING: {warning}" if warning else ""))
 
 
 def _card(model: str) -> dict:
@@ -868,6 +885,11 @@ def main(argv=None) -> None:
 
     s = sub.add_parser("economics", help="self-host vs pay-per-call, from measured inputs")
     s.add_argument("--config", default=None, help="default: <data>/economics.json")
+    s.add_argument(
+        "--allow-unmeasured",
+        action="store_true",
+        help="render even if the inputs are still placeholders (the report will say so)",
+    )
     s.set_defaults(fn=cmd_economics)
 
     a = p.parse_args(argv)

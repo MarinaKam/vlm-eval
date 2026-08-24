@@ -23,13 +23,46 @@ good score means "you could swap this in", not "it does well on some academic be
 The workflow has three parts: **build a dataset**, **run models against it**, **decide with numbers**.
 Every step writes plain files, and every step can be interrupted and resumed.
 
+## Order matters
+
+Each step reads what the previous one wrote. Running them out of order does not fail loudly by itself —
+it produces a confident report from nothing — so the tool refuses where it can and you should follow
+this order regardless:
+
+```
+  export ──► download ──► run / sweep ──► metrics ──► report ────┐
+     │                        │              │                   ├─► the markdown you send people
+     │                        └─► review ────┘                   │
+     │                                       └─► compare ────────┤
+     ├─► volume ─┐                                               │
+     └─► cost ───┴─► (fill data/economics.json) ─► economics ────┘
+```
+
+| command | needs | produces |
+|---|---|---|
+| `export` | access to your database | `data/manifest.csv`, tags, prompts, reference answers |
+| `download` | `manifest.csv` | `data/images/` |
+| `run` / `sweep` | images + tags + prompts | `runs/<model>/*.jsonl` |
+| `metrics` | a run | `runs/<model>/metrics.json` |
+| `review` | a run | HTML page → your verdicts → sharper metrics |
+| `report` | `metrics.json` + `reports/cards/<model>.json` | `reports/<model>.md` |
+| `compare` | `metrics.json` for each model | `reports/comparison.md` |
+| `volume` | database access | images/month, busiest hour → into `economics.json` |
+| `cost` | `manifest.csv` + your app's cost command | $/image → into `economics.json` |
+| `economics` | **`volume` and `cost` done first** | `reports/economics.md` |
+
+`vlm-eval status` shows where you are at any point. `economics` **refuses to run** while its inputs are
+still the example values — the arithmetic is trivial, the measurements are the whole point, and a
+plausible report built on placeholders is worse than no report. `--allow-unmeasured` overrides it and
+stamps the warning into the file.
+
 ## 0. Setup (once)
 
 ```bash
 uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
 source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
-.venv/bin/pytest                                       # 49 tests including end-to-end
+.venv/bin/pytest                                       # 50 tests including end-to-end
 ```
 
 `.env` holds everything machine-specific. It is gitignored, as are `data/`, `runs/` and `reports/`.
