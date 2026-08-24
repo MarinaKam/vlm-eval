@@ -88,7 +88,8 @@ function dl(){{const out=[];CASES.forEach((c,i)=>{{const v=document.querySelecto
     return out
 
 
-def apply_decisions(files: list[Path], store: Path = DATA / "manual_labels.json") -> dict[str, Any]:
+def apply_decisions(files: list[Path], store: Path | None = None) -> dict[str, Any]:
+    store = store or DATA / "manual_labels.json"
     labels: dict[str, dict] = json.loads(store.read_text()) if store.exists() else {}
     added = 0
     for f in files:
@@ -102,9 +103,10 @@ def apply_decisions(files: list[Path], store: Path = DATA / "manual_labels.json"
     return {"added": added, "total": len(labels)}
 
 
-def manual_agreement(rows: list[dict], gemini: dict[int, dict], store: Path = DATA / "manual_labels.json") -> dict:
+def manual_agreement(rows: list[dict], gemini: dict[str, dict], store: Path | None = None) -> dict:
     """On human-labelled (image, tag) pairs: accuracy of the model and of Gemini. Answers the question
     'when they disagree, who is right?'."""
+    store = store or DATA / "manual_labels.json"
     if not store.exists():
         return {"n": 0}
     labels = json.loads(store.read_text())

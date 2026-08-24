@@ -1,7 +1,7 @@
 """Metrics over run JSONL rows. Pure functions, no I/O."""
 
 import statistics
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Any
 
 
@@ -110,12 +110,15 @@ def latency_stats(values: list[float]) -> dict[str, Any]:
     if not values:
         return {"n": 0}
     vs = sorted(values)
+    mean = statistics.mean(vs)
     return {
         "n": len(vs),
-        "mean_s": round(statistics.mean(vs), 2),
+        "mean_s": round(mean, 2),
         "median_s": round(statistics.median(vs), 2),
         "p95_s": round(vs[min(len(vs) - 1, int(0.95 * len(vs)))], 2),
-        "images_per_hour_serial": round(3600 / statistics.mean(vs), 0),
+        # A stubbed or cached backend can report zero elapsed time; there is no throughput to derive
+        # from that, and it must not take the whole metrics run down.
+        "images_per_hour_serial": round(3600 / mean, 0) if mean > 0 else None,
     }
 
 
@@ -178,4 +181,32 @@ def grounding_stats(rows: list[dict], gemini: dict[str, dict]) -> dict[str, Any]
             "fp_rate_vs_reference": _pct(c["neg_detected"], c["neg_img"]),
         }
         for label, c in out.items()
+    }
+
+
+def tagset_agreement(a: dict[str, set[str]], b: dict[str, set[str]]) -> dict[str, Any]:
+    """Compare two runs' positive-tag sets over the images they share.
+
+    Used to answer "does asking the questions in bigger batches change the answers" — and, when both
+    runs used the *same* settings, "does the API even answer the same way twice".
+    """
+    common = set(a) & set(b)
+    if not common:
+        return {"n_images": 0}
+    identical = sum(1 for k in common if a[k] == b[k])
+    inter = sum(len(a[k] & b[k]) for k in common)
+    union = sum(len(a[k] | b[k]) for k in common)
+    lost: Counter = Counter()
+    gained: Counter = Counter()
+    for k in common:
+        lost.update(a[k] - b[k])
+        gained.update(b[k] - a[k])
+    return {
+        "n_images": len(common),
+        "identical_pct": _pct(identical, len(common)),
+        "jaccard_pct": _pct(inter, union),
+        "tags_first": sum(len(a[k]) for k in common),
+        "tags_second": sum(len(b[k]) for k in common),
+        "lost": lost.most_common(8),
+        "gained": gained.most_common(8),
     }
