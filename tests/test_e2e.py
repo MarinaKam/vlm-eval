@@ -895,3 +895,51 @@ def test_a_card_may_reference_a_priced_option_instead_of_copying_it(tmp_path):
     # Inline numbers still work for a card used without any economics config.
     inline = {"projection": {"hardware": "T4", "images_per_hour": 500, "usd_per_hour": 0.5}}
     assert report.resolve_projection(inline, [])["hardware"] == "T4"
+
+
+def test_a_truncated_answer_is_reported_not_read_as_a_refusal():
+    """A reasoning model can spend the whole token budget thinking and return empty content. Parsed
+    naively that looks like a model with no opinion; it is a model that never got to speak."""
+    from vlm_eval.backends.base import Response
+    from vlm_eval.runner import truncation_error
+
+    finished = Response(text='{"pool": true}', latency_s=0.1, finish_reason="stop")
+    assert truncation_error(finished, 3000) is None
+
+    thought_itself_out = Response(text="", latency_s=0.1, finish_reason="length", reasoning_chars=4200)
+    msg = truncation_error(thought_itself_out, 3000)
+    assert "cut off at the 3000-token budget" in msg
+    assert "spent it reasoning (4200 characters" in msg
+    assert "returned nothing" in msg and "raise the budget" in msg
+
+    cut_mid_answer = Response(text='{"pool": tr', latency_s=0.1, finish_reason="length")
+    msg = cut_mid_answer and truncation_error(cut_mid_answer, 500)
+    assert "cut off at the 500-token budget" in msg
+    assert "returned nothing" not in msg  # it did say something, just not all of it
+
+
+def test_the_backend_surfaces_finish_reason_and_reasoning(monkeypatch):
+    """Both live in the response and were previously dropped, which is why the truncation was invisible."""
+    import httpx
+
+    from vlm_eval.backends.openai_compat import OpenAICompatBackend
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "", "reasoning": "let me think about this"},
+                        "finish_reason": "length",
+                    }
+                ],
+                "usage": {"completion_tokens": 1000},
+            },
+        )
+
+    be = OpenAICompatBackend("http://x/v1", "m", flavor="ollama", transport=httpx.MockTransport(handler))
+    r = be.chat([], "prompt")
+    assert r.finish_reason == "length"
+    assert r.reasoning_chars == len("let me think about this")
+    assert r.text == ""

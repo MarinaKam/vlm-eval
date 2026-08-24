@@ -104,8 +104,13 @@ class OpenAICompatBackend:
         data = resp.json()
         choice = data["choices"][0]
         usage = data.get("usage") or {}
+        message = choice.get("message") or {}
+        # Some servers put chain-of-thought in `reasoning` (Ollama) or `reasoning_content` (others).
+        reasoning = message.get("reasoning") or message.get("reasoning_content") or ""
         return Response(
-            text=(choice.get("message") or {}).get("content") or "",
+            text=message.get("content") or "",
+            finish_reason=choice.get("finish_reason"),
+            reasoning_chars=len(reasoning),
             latency_s=latency,
             usage={k: int(v) for k, v in usage.items() if isinstance(v, (int, float))},
             logprobs=self._parse_logprobs(choice),

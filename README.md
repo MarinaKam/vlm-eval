@@ -474,6 +474,53 @@ git ls-files | grep -E "^(data|runs|reports)/|\.env$|models\.local\.json|decisio
 `.env` holds your paths and tokens. `data/` holds client images, database exports and your prompt texts.
 `runs/` and `reports/` are derived from them. Tag questions and prompts never appear in code.
 
+## What has actually been exercised
+
+Not every path here has been run against a real model. Code review and unit tests catch a lot, but they
+do not catch a wrong header, a renamed field or a server that answers differently than its docs — so
+this table says plainly which is which. Verify a row yourself before trusting a long run through it.
+
+| path | status | how to check it yourself |
+|---|---|---|
+| OpenAI-compatible server via **Ollama** | run end to end, all four tasks | — |
+| **Florence-2** via transformers | run end to end (captions, grounding, tagging) | — |
+| Metrics, review, reports, economics | run on real data; every published figure re-derived independently | `python scripts/verify_published_figures.py` |
+| Dataset export | run against one Django schema only | on another schema it is a template — see "Bring your own dataset" |
+| **vLLM** server | **not run** — mocked in tests only | needs an NVIDIA GPU; see below |
+| **InternVL** via transformers | **not run** — routing tested, backend not executed | `vlm-eval hf internvl captions --limit 2` (~17 GB download on first run) |
+| **PaliGemma** via transformers | **not run** — same | accept the Gemma licence, `export HF_TOKEN=…`, then `vlm-eval hf paligemma captions --limit 2` (~6 GB) |
+
+### Checking the vLLM path
+
+This is the gap worth closing first, because vLLM is where two things this tool advertises actually
+come from: a response schema enforced by the decoder (malformed JSON becomes impossible, rather than
+rare) and token logprobs (a real per-tag probability instead of a constant). Both are written from the
+documentation and covered by mocks; neither has met a live server.
+
+**It cannot be checked on Apple silicon.** The `vllm/vllm-openai` image is CUDA and x86-64; Docker
+Desktop on a Mac has no GPU passthrough, so `--gpus all` has nothing to attach to. You need a machine
+with an NVIDIA GPU — a cloud VM (`docs/INFRA.md` has a recipe) or any rented box. Ollama is the
+Apple-silicon path and is fully exercised.
+
+On that GPU machine, in **two terminals** — the server runs in the foreground:
+
+```bash
+# terminal 1 — the server, stays running
+docker run --rm --gpus all -p 8000:8000 -v /opt/hf:/root/.cache/huggingface \
+  vllm/vllm-openai:latest --model Qwen/Qwen2.5-VL-7B-Instruct --served-model-name qwen2.5-vl \
+  --max-model-len 16384 --limit-mm-per-prompt '{"image": 20}'
+```
+
+```bash
+# terminal 2 — wait for it to answer, then send one image
+curl -s localhost:8000/health && vlm-eval run vllm-smoke tagging --limit 1 \
+    --served-name qwen2.5-vl --base-url http://localhost:8000/v1 --flavor vllm
+```
+
+In `runs/vllm-smoke/tagging_chunk*.jsonl` the row should have `errors: []`, an answer for every tag, and
+a non-empty `confidence` map — that last one is the proof logprobs came through. If `confidence` is
+empty the numbers are still valid, but per-tag confidence is not available and the report should say so.
+
 ## Limitations, honestly
 
 - Latency measured on a laptop is not production latency; `docs/INFRA.md` has a recipe for re-running

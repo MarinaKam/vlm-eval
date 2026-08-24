@@ -113,7 +113,10 @@ def render_model(card: dict, m: dict, *, options: list | None = None) -> str:
         ["Detection / grounding", card.get("cap_detection", ""), card.get("cap_detection_notes", "")],
         ["Confidence scores", card.get("cap_confidence", ""), card.get("cap_confidence_notes", "")],
     ]
+    comp = tag.get("agreement", {}).get("composition", {})
+    comp_text = ", ".join(f"{k} {v}" for k, v in (comp.get("by_type") or {}).items()) or "—"
     perf_rows = [
+        ["Sample the tagging numbers describe", f"{comp.get('n_images', '—')} images ({comp_text})"],
         ["GPU", _v(card.get("gpu"))],
         ["VRAM (peak, measured)", _v(perf.get("vram_peak_gb") or card.get("vram_gb"), " GB")],
         ["Model size (weights)", _v(card.get("model_size_gb"), " GB")],

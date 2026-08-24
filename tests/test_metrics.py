@@ -133,3 +133,27 @@ def test_current_option_must_exist():
     with pytest.raises(ValueError) as e:
         Inputs(options=[Option(name="A", kind="per_image", price=1.0)], current="B")
     assert "not one of the options" in str(e.value)
+
+
+def test_results_always_state_what_they_were_measured_on():
+    """Indoor and outdoor images are asked different numbers of questions, so a lopsided subset shifts
+    recall, latency and cost together. A prefix of a block-ordered manifest was once 98% indoor while
+    the dataset was 63% — right numbers, describing something other than the dataset."""
+    rows = [
+        {"image_id": "a", "repeat": 0, "image_type": "indoor", "answers": {"kitchen": True}},
+        {"image_id": "b", "repeat": 0, "image_type": "indoor", "answers": {"kitchen": False}},
+        {"image_id": "c", "repeat": 0, "image_type": "outdoor", "answers": {"garden": True}},
+        {"image_id": "a", "repeat": 1, "image_type": "indoor", "answers": {"kitchen": True}},
+    ]
+    comp = metrics.composition(rows)
+    assert comp["n_images"] == 3  # the repeat is not a fourth image
+    assert comp["by_type"] == {"indoor": 2, "outdoor": 1}
+    assert comp["share_pct"] == {"indoor": 66.7, "outdoor": 33.3}
+
+    # ...and it travels with the result, so no report can quietly omit it.
+    reference = {
+        "a": {"tags": {"kitchen": 0.9}, "evaluable_slugs": ["kitchen"]},
+        "b": {"tags": {}, "evaluable_slugs": ["kitchen"]},
+        "c": {"tags": {"garden": 0.9}, "evaluable_slugs": ["garden"]},
+    }
+    assert metrics.tagging_agreement(rows, reference)["composition"] == comp

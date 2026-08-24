@@ -15,6 +15,23 @@ from .dataset import Item, image_size, load_jsonl
 from .tasks import captions, grounding, summary, tagging
 
 
+def truncation_error(r: Response, budget: int) -> str | None:
+    """An answer cut off by the token budget, reported rather than parsed as a refusal.
+
+    A reasoning model can spend the entire budget thinking and return empty content with
+    `finish_reason="length"`. Parsed naively that is a model with no opinion; it is really a model
+    that never got to speak, and the difference decides whether a number means anything.
+    """
+    if r.finish_reason != "length":
+        return None
+    detail = f"answer cut off at the {budget}-token budget"
+    if r.reasoning_chars:
+        detail += f"; the model spent it reasoning ({r.reasoning_chars} characters of it)"
+    if not r.text.strip():
+        detail += " and returned nothing — raise the budget for this model"
+    return detail
+
+
 @dataclass
 class RunConfig:
     model: str
@@ -85,6 +102,9 @@ def run_tagging_one(backend: Backend, item: Item, tags: list[dict], cfg: RunConf
             continue
         responses.append(r)
         raw.append(r.text)
+        cut = truncation_error(r, 3000)
+        if cut:
+            errors.append(cut)
         answers.update(tagging.parse_answers(r.text, chunk))
         if r.logprobs:
             confidence.update(tagging.confidence_from_logprobs(r.logprobs, chunk))
@@ -121,7 +141,8 @@ def run_captions_one(
             max_tokens=captions.MAX_TOKENS,
             temperature=captions.TEMPERATURE,
         )
-        parsed, raw, usage, err = captions.parse(r.text, prompts), r.text, r.usage, []
+        cut = truncation_error(r, captions.MAX_TOKENS)
+        parsed, raw, usage, err = captions.parse(r.text, prompts), r.text, r.usage, [cut] if cut else []
     except Exception as exc:
         parsed, raw, usage, err = {k: None for k in prompts}, "", {}, [f"{type(exc).__name__}: {exc}"]
     return {
@@ -193,7 +214,8 @@ def run_summary_one(backend: Backend, prop: dict, prompt: str, images_dir: Path)
         r = backend.chat(
             imgs, prompt, json_schema=summary.SCHEMA, max_tokens=summary.MAX_TOKENS, temperature=summary.TEMPERATURE
         )
-        text, raw, usage, err = summary.parse(r.text), r.text, r.usage, []
+        cut = truncation_error(r, summary.MAX_TOKENS)
+        text, raw, usage, err = summary.parse(r.text), r.text, r.usage, [cut] if cut else []
     except Exception as exc:
         text, raw, usage, err = None, "", {}, [f"{type(exc).__name__}: {exc}"]
     return {

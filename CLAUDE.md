@@ -49,6 +49,19 @@ Every change ends with three questions, answered explicitly rather than assumed:
 Commands that talk to a model or a database are verified by **running them**, not by their `--help`.
 Say plainly which ones were not run and why (a 17 GB download is a reason; "should work" is not).
 
+The README carries a table of what has and has not been exercised against a real model. **Update it in
+the same change** that runs a path for the first time, or that adds one. A public repository that
+implies more testing than happened is worse than one that admits the gap.
+
+After writing or regenerating a report, re-derive it:
+
+```bash
+python scripts/verify_published_figures.py
+```
+
+It recomputes every published number from `runs/` and `data/` importing nothing from this package. A
+MISMATCH means the report is wrong or the data moved on — it has already caught the latter once.
+
 ## Never commit
 
 `.env`, `data/`, `runs/`, `reports/`, `decisions_*.json` — client images, database exports, prompt texts

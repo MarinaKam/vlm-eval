@@ -60,8 +60,26 @@ def tagging_agreement(rows: list[dict], gemini: dict[int, dict], *, repeat: int 
 
     return {
         "n_images": n_images,
+        "composition": composition(rows, repeat=repeat),
         "overall": derived(tot),
         "per_tag": {slug: derived(c) for slug, c in sorted(per_tag.items())},
+    }
+
+
+def composition(rows: list[dict], *, repeat: int = 0) -> dict[str, Any]:
+    """What the sample was made of — reported next to every result, never left implied.
+
+    Indoor and outdoor images are asked different numbers of questions, so a subset that is mostly one
+    of them shifts recall, latency and cost together. A run on a `--limit` prefix of a manifest whose
+    order was built in blocks was once 98% indoor while the dataset was 63% — the numbers were right
+    and described something other than the dataset.
+    """
+    kinds: Counter = Counter(r.get("image_type", "unknown") for r in rows if r.get("repeat", 0) == repeat)
+    total = sum(kinds.values())
+    return {
+        "n_images": total,
+        "by_type": dict(kinds.most_common()),
+        "share_pct": {k: _pct(v, total) for k, v in kinds.most_common()},
     }
 
 
