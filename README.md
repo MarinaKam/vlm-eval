@@ -231,6 +231,13 @@ means:
   immutable identities; a backend that cannot prove one is recorded as `unknown` and may run fresh
   files but never resume non-empty ones.
 
+Any compatible model may be evaluated — your own Ollama build, any HF checkpoint, anything a server
+exposes. Model identity does not restrict which model you can use; it prevents results from different
+model weights from being silently combined in one run file. Updating a model between experiments is
+fine — the updated weights are simply a new experiment, run under a new name or after archiving the old
+file. The one backend caveat: a plain vLLM/OpenAI endpoint reports a model name but no weights digest,
+so fresh runs work fully there while automatic resume of a non-empty file is refused.
+
 Change any of it and the next run stops and names what changed; archive the file or pick another run
 name. Every backend goes through the same gate — a served model, Florence-2, PaliGemma, a throughput
 run — and a test walks the CLI's syntax tree to prove no path writes rows around it.
