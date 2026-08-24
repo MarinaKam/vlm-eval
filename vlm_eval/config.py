@@ -37,6 +37,20 @@ RUNS = _dir("VLM_EVAL_RUNS_DIR", ROOT / "runs")
 REPORTS = _dir("VLM_EVAL_REPORT_DIR", ROOT / "reports")
 
 
+def model_presets() -> list[Path]:
+    """Preset files, later ones winning: the repo's own, then yours.
+
+    `models.local.json` is gitignored, so your models never turn into changes to a tracked file — and a
+    `git pull` cannot take them away. `VLM_EVAL_MODELS` points somewhere else entirely (a shared file on
+    a team machine, for example).
+    """
+    files = [ROOT / "models.json", ROOT / "models.local.json"]
+    override = os.environ.get("VLM_EVAL_MODELS")
+    if override:
+        files.append(Path(os.path.expanduser(override)))
+    return [f for f in files if f.exists()]
+
+
 def source_repo() -> Path:
     """Path to the source Django app (for the export scripts). Required, no default."""
     val = os.environ.get("VLM_EVAL_SOURCE_REPO")

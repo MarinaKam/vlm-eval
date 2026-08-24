@@ -16,3 +16,6 @@ reports/
 .idea/
 # Adjudication/review decisions: contain real image ids
 decisions_*.json
+
+# Your own model presets — never tracked, never lost to a pull
+models.local.json

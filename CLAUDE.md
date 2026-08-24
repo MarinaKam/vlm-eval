@@ -14,8 +14,13 @@ lands there directly cannot be reviewed or reverted cleanly.
 One branch per task, not per file: incidental fixes discovered along the way belong in the same branch,
 not in a new one.
 
-Claude creates the branch. Claude does **not** commit, push, merge, rebase or tag — those are prepared
-as text for the user to run.
+**Check where you are before starting, and branch from the right place.** `git branch --show-current`
+first. If the new work builds on an unmerged branch, branch from *that*, not from `main` — otherwise
+stashing across the two produces conflicts for no reason. If uncommitted work is already in the tree,
+move it with the branch rather than leaving it behind.
+
+Claude creates the branch. Claude does **not** commit, push, merge, rebase, tag, force-checkout over
+someone else's work, or delete branches — those are prepared as text for the user to run.
 
 ## Before handing work back
 
@@ -30,6 +35,19 @@ All three must pass. "Should work" is not a report — run it and quote the outp
 New behaviour needs a test that fails without the change. End-to-end paths belong in
 `tests/test_e2e.py`, which drives the real chain (run → metrics → review → reports) against a stub
 backend.
+
+Every change ends with three questions, answered explicitly rather than assumed:
+
+1. **Which branch is this on?** — `git branch --show-current`, and is it the right base?
+2. **Does the README still describe reality?** — new command, changed flag, changed default, removed
+   script: the README is part of the change, not a follow-up.
+3. **Do the end-to-end tests cover what changed?** — a new path that only unit tests touch is untested
+   where it matters. If a shell script or command is deleted, prove its capability still exists
+   somewhere (`sweep --via` exists because deleting `run_hf_models.sh` had silently dropped three
+   models).
+
+Commands that talk to a model or a database are verified by **running them**, not by their `--help`.
+Say plainly which ones were not run and why (a 17 GB download is a reason; "should work" is not).
 
 ## Never commit
 

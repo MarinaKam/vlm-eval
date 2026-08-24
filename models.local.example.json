@@ -1,0 +1,26 @@
+{
+  "_comment": "Copy to models.local.json (gitignored) and edit. These entries override models.json.",
+
+  "my-vllm-model": {
+    "run_name": "qwen3-vl-8b-vllm",
+    "served_name": "Qwen/Qwen3-VL-8B-Instruct",
+    "base_url": "http://localhost:8000/v1",
+    "flavor": "vllm",
+    "coords": "norm1000"
+  },
+
+  "my-ollama-model": {
+    "run_name": "llava-13b",
+    "served_name": "llava:13b",
+    "base_url": "http://localhost:11434/v1",
+    "flavor": "ollama",
+    "coords": "abs"
+  },
+
+  "my-finetune": {
+    "run_name": "internvl-finetuned-v3",
+    "via": "internvl",
+    "checkpoint": "/path/to/your/checkpoint",
+    "coords": "norm1000"
+  }
+}

@@ -523,3 +523,71 @@ def test_sweep_covers_models_without_a_server(monkeypatch):
     ]
     # a stage set to 0 is skipped here too
     assert sweep("florence", captions=0) == [("florence", "grounding"), ("florence", "tagging")]
+
+
+def test_user_presets_override_the_repo_and_carry_the_backend(tmp_path, monkeypatch):
+    """Someone else's models must not require editing a tracked file, and a preset can say how the
+    model is reached — so `sweep mine` works without repeating --via and --checkpoint."""
+    import argparse
+
+    from vlm_eval import cli
+
+    repo = tmp_path / "models.json"
+    repo.write_text(json.dumps({"_comment": "ignored", "qwen3": {"run_name": "repo-run", "flavor": "vllm"}}))
+    mine = tmp_path / "models.local.json"
+    mine.write_text(
+        json.dumps(
+            {
+                "qwen3": {"run_name": "my-run", "flavor": "ollama"},
+                "finetune": {"run_name": "ft-v3", "via": "internvl", "checkpoint": "/weights/x", "coords": "abs"},
+            }
+        )
+    )
+    monkeypatch.setattr("vlm_eval.config.model_presets", lambda: [repo, mine])
+
+    assert sorted(cli._presets()) == ["finetune", "qwen3"]  # comments dropped, files merged
+
+    a = argparse.Namespace(
+        model="qwen3", served_name=None, base_url=None, flavor=None, coords=None, via="server", checkpoint=None
+    )
+    cli._resolve(a)
+    assert (a.model, a.flavor) == ("my-run", "ollama")  # the local file wins
+
+    b = argparse.Namespace(
+        model="finetune", served_name=None, base_url=None, flavor=None, coords=None, via="server", checkpoint=None
+    )
+    cli._resolve(b)
+    assert (b.model, b.via, b.checkpoint, b.coords) == ("ft-v3", "internvl", "/weights/x", "abs")
+
+    # An explicit flag still beats the preset.
+    c = argparse.Namespace(
+        model="finetune",
+        served_name=None,
+        base_url=None,
+        flavor=None,
+        coords="norm1000",
+        via="florence",
+        checkpoint=None,
+    )
+    cli._resolve(c)
+    assert (c.via, c.coords) == ("florence", "norm1000")
+
+
+def test_unknown_model_name_is_used_as_is(monkeypatch):
+    """A one-off model needs no preset at all — pass the flags and the name becomes the run folder."""
+    import argparse
+
+    from vlm_eval import cli
+
+    monkeypatch.setattr(cli, "_presets", dict)
+    a = argparse.Namespace(
+        model="whatever",
+        served_name="x:7b",
+        base_url="http://h/v1",
+        flavor="ollama",
+        coords=None,
+        via="server",
+        checkpoint=None,
+    )
+    cli._resolve(a)
+    assert a.model == "whatever" and a.served_name == "x:7b" and a.coords == "norm1000"

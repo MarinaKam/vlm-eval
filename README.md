@@ -29,7 +29,7 @@ Every step writes plain files, and every step can be interrupted and resumed.
 uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
 source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
-.venv/bin/pytest                                       # 47 tests including end-to-end
+.venv/bin/pytest                                       # 49 tests including end-to-end
 ```
 
 `.env` holds everything machine-specific. It is gitignored, as are `data/`, `runs/` and `reports/`.
@@ -91,13 +91,34 @@ vlm-eval run qwen3 grounding            # bounding boxes for specific features
 vlm-eval run qwen3 summary              # one description from all photos of a listing
 ```
 
-Add a preset to `models.json` (`run_name`, `served_name`, `flavor`, `base_url`, `coords`) and it works
-everywhere. Any field can still be overridden with a flag, and a name that is not a preset is used as-is
-— so a one-off vLLM server needs no preset:
+### Your own models
+
+Copy `models.local.example.json` to `models.local.json` and describe them there. That file is
+gitignored, so your models never become changes to a tracked file and a `git pull` cannot take them
+away; it also overrides same-named entries in `models.json`. `VLM_EVAL_MODELS` points at a third file
+if you keep presets elsewhere (a shared one on a team machine, say).
+
+```json
+{
+  "my-vllm-model": {"run_name": "qwen3-vl-8b-vllm", "served_name": "Qwen/Qwen3-VL-8B-Instruct",
+                    "base_url": "http://localhost:8000/v1", "flavor": "vllm", "coords": "norm1000"},
+  "my-finetune":   {"run_name": "internvl-ft-v3", "via": "internvl",
+                    "checkpoint": "/path/to/your/checkpoint", "coords": "abs"}
+}
+```
+
+A preset can carry `via` and `checkpoint`, so `vlm-eval sweep my-finetune` reaches a local checkpoint
+without repeating those flags. Any field can be overridden with a flag, and a name that is not a preset
+is used as-is — a one-off server needs no preset at all:
 
 ```bash
 vlm-eval run my-model tagging --served-name Qwen/Qwen3-VL-8B-Instruct --base-url http://localhost:8000/v1 --flavor vllm
 ```
+
+**A genuinely new architecture** — one that is neither an OpenAI-compatible API nor one of the
+transformers backends already here — needs about thirty lines of code: a class with a `chat(images,
+prompt, *, json_schema, max_tokens, temperature, logprobs) -> Response` method, next to the ones in
+`vlm_eval/backends/`. Everything downstream works unchanged, because that is the only contract.
 
 Useful flags: `--limit N` (subset), `--workers N` (concurrency, for a server), `--no-logprobs` (Ollama
 doesn't expose them), `--coords abs|norm1000` (bbox convention differs per model family).
@@ -297,12 +318,37 @@ Run the harness against someone else's `data/` and it asks their questions, not 
   failure instead of calling the model: given no images at all, a model will still write a fluent,
   entirely invented property description.
 
+## Changing the tool
+
+Three questions close every change; they are cheap and they are what actually goes wrong:
+
+1. **Which branch?** — `git branch --show-current`. Never `main`. If the work builds on a branch that
+   is not merged yet, branch from *that*, not from `main`.
+2. **Does the README still describe reality?** — a new command, a changed flag or default, a deleted
+   script: documentation is part of the change, not a follow-up.
+3. **Do the end-to-end tests cover it?** — `tests/test_e2e.py` drives the real chain against a stub
+   backend. A path exercised only by unit tests is untested where it matters. If you delete a script,
+   prove its capability still exists (`sweep --via` exists because deleting `run_hf_models.sh` had
+   quietly dropped three models).
+
+Then:
+
+```bash
+.venv/bin/pytest -q
+.venv/bin/ruff check vlm_eval tests scripts
+.venv/bin/ruff format --check vlm_eval tests scripts
+```
+
+Commands that reach a model or a database are verified by running them, not by their `--help`. Say
+which ones were not run and why — "a 17 GB download" is a reason, "should work" is not.
+
 ## Privacy: what is safe to publish
 
 The code is generic; everything private stays in ignored places. Before pushing:
 
 ```bash
-git ls-files | grep -E "^(data|runs|reports)/|\.env$|decisions_.*\.json"   # must print nothing
+git ls-files | grep -E "^(data|runs|reports)/|\.env$|models\.local\.json|decisions_.*\.json"
+# must print nothing
 ```
 
 `.env` holds your paths and tokens. `data/` holds client images, database exports and your prompt texts.
