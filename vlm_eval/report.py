@@ -81,6 +81,49 @@ def resolve_projection(card: dict, options: list | None = None) -> dict:
     return proj
 
 
+def _completion_line(m: dict, tagging_trunc: dict) -> str:
+    """Truncation for every task, not only tagging.
+
+    A caption run that spends its whole budget reasoning comes back empty, and without this it reads as
+    a model with nothing to say about the picture.
+    """
+    per_task = m.get("completion") or {}
+    if not per_task:
+        return (
+            f"{_v(tagging_trunc.get('images_affected'))} images ({_v(tagging_trunc.get('pct'), '%')}) "
+            "in tagging — recorded as unknown, not parsed"
+        )
+    parts = [
+        f"{task} {t.get('images_affected', 0)} ({_v(t.get('pct'), '%')})"
+        for task, t in per_task.items()
+        if t.get("images_affected")
+    ]
+    if not parts:
+        return "none — every call finished within its token budget"
+    return ", ".join(parts) + " — recorded as unknown, not parsed"
+
+
+def _provenance_line(m: dict) -> str:
+    """Whether these files can be shown as a clean measurement, stated in the report itself.
+
+    A file whose settings were never recorded is not disqualified — it is labelled, so the label has to
+    travel with the numbers instead of living in somebody's memory of how the run was started.
+    """
+    per_task = m.get("provenance") or {}
+    if not per_task:
+        return "not recorded"
+    unclean = {task: d for task, d in per_task.items() if d.get("status") != "verified"}
+    if not unclean:
+        return "verified — every run file records the settings that produced it"
+    return (
+        "; ".join(
+            f"{task}: {d.get('status')}" + (f" ({d['unverified_rows']} rows)" if d.get("unverified_rows") else "")
+            for task, d in unclean.items()
+        )
+        + " — settings asserted, not verified"
+    )
+
+
 def render_model(card: dict, m: dict, *, options: list | None = None) -> str:
     tag = m.get("tagging", {})
     over = tag.get("agreement", {}).get("overall", {})
@@ -113,7 +156,13 @@ def render_model(card: dict, m: dict, *, options: list | None = None) -> str:
         ["Detection / grounding", card.get("cap_detection", ""), card.get("cap_detection_notes", "")],
         ["Confidence scores", card.get("cap_confidence", ""), card.get("cap_confidence_notes", "")],
     ]
+    comp = tag.get("agreement", {}).get("composition", {})
+    trunc = tag.get("agreement", {}).get("truncation", {})
+    comp_text = ", ".join(f"{k} {v}" for k, v in (comp.get("by_type") or {}).items()) or "—"
     perf_rows = [
+        ["Sample the tagging numbers describe", f"{comp.get('n_images', '—')} images ({comp_text})"],
+        ["Answers the model never finished", _completion_line(m, trunc)],
+        ["Provenance of the run files", _provenance_line(m)],
         ["GPU", _v(card.get("gpu"))],
         ["VRAM (peak, measured)", _v(perf.get("vram_peak_gb") or card.get("vram_gb"), " GB")],
         ["Model size (weights)", _v(card.get("model_size_gb"), " GB")],

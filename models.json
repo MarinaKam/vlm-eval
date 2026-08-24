@@ -5,7 +5,9 @@
     "served_name": "qwen3-vl:8b",
     "flavor": "ollama",
     "base_url": "http://localhost:11434/v1",
-    "coords": "norm1000"
+    "coords": "norm1000",
+    "extra_output_tokens": 3000,
+    "_why": "Qwen3-VL reasons before answering, and how much depends on how much input there is: a single image fits production's budget, an 11-image summary does not. Measured: with the stock budget four of five summaries came back empty."
   },
   "qwen2.5": {
     "run_name": "qwen2.5vl-7b-ollama",

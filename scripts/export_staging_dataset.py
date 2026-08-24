@@ -174,7 +174,14 @@ def _fill(kind, target):
 
 _fill("indoor", TARGET_INDOOR)
 _fill("outdoor", TARGET_OUTDOOR)
-print(f"selected: {len(selected)} images")
+
+# Shuffle before writing. The selection above is built in blocks — tag-cover images first, then all
+# indoor, then all outdoor — so any `--limit N` prefix of that order is not a sample of the dataset but
+# a sample of one block. Measured on a real export: the first 280 rows were 98% indoor against 52% in
+# the rest, and indoor images carry nearly twice as many questions. Order is not part of the data, so
+# fixing it here costs nothing; a biased prefix costs a wrong conclusion.
+rng.shuffle(selected)
+print(f"selected: {len(selected)} images (order shuffled so any --limit prefix is representative)")
 
 images = {i.id: i for i in Image.objects.filter(id__in=selected)}
 with (OUT_DIR / "manifest.csv").open("w", newline="") as fh:

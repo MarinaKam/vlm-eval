@@ -23,13 +23,14 @@ name that is not a preset is used as-is.
 
 import argparse
 import json
+import platform
 import sys
 import time
 
-from . import dataset, metrics, pipeline_config, preconditions, report, review, runner
+from . import dataset, metrics, pipeline_config, preconditions, provenance, report, review, runner
 from .backends.openai_compat import OpenAICompatBackend
 from .config import REPORTS
-from .tasks import captions, grounding, summary
+from .tasks import captions, grounding, summary, tagging
 
 
 def _presets() -> dict:
@@ -55,6 +56,7 @@ def _resolve(a) -> None:
         # transformers-backed checkpoint without repeating --via and --checkpoint every time.
         ("via", "server"),
         ("checkpoint", None),
+        ("extra_output_tokens", 0),
     ):
         if getattr(a, field, None) in (None, "server") and field in preset:
             setattr(a, field, preset[field])
@@ -103,6 +105,123 @@ def _read_bytes(item):
     return runner._read_image(item)
 
 
+def _image_prep() -> str:
+    """How the images on disk were encoded. Re-download at a different quality and every answer is
+    about slightly different pictures, which a fingerprint over prompts alone would not notice."""
+    try:
+        pc = pipeline_config.load()
+        return (
+            f"max_dim={pc.max_dimension},q={pc.jpeg_quality},target_kb={pc.target_size_kb},"
+            f"optimize={pc.optimize_enabled}"
+        )
+    except Exception:  # a run can proceed on defaults; the fingerprint records that it did
+        return "unknown"
+
+
+def _tagging_identity(tags: list[dict], items: list) -> dict:
+    """What decides which questions each image is asked, beyond the question texts themselves.
+
+    `category` and `order` drive chunk composition, and each image's `image_type` selects its question
+    set — change any of them and different requests go out over identical texts and identical pixels.
+    Lists, not dicts: `digest_of` sorts dict keys, which would erase exactly the ordering this records.
+    """
+    return {
+        "tags": [[t["slug"], t["category"], t.get("order", 0), t["question_text"]] for t in tags],
+        "image_types": [[it.image_id, it.image_type] for it in sorted(items, key=lambda x: x.image_id)],
+    }
+
+
+def _summary_items() -> list[dataset.Item]:
+    """The images the summary task actually reads: the ones listed per property, not the manifest.
+
+    48 of them exist only in listings, so a manifest-wide digest would never notice one being swapped —
+    the exact images a summary is about would be the only ones nobody was watching.
+    """
+    props = dataset.load_jsonl(dataset.DATA / "properties.jsonl")
+    ids = sorted({str(i) for prop in props for i in prop["image_ids"]})
+    return [dataset.Item(i, "", "", "") for i in ids]
+
+
+def _route(be) -> str:
+    """Where the requests actually go. A served name alone cannot tell two servers apart."""
+    base = getattr(be, "base_url", None)
+    if base:
+        return f"{getattr(be, 'flavor', '')}@{base}"
+    device = getattr(be, "device", None)
+    return f"in-process/{device}" if device else ""
+
+
+def _model_identity(be) -> str:
+    """The immutable identity of the weights, when the backend can prove one.
+
+    A served name is a tag somebody can re-point. Ollama's /api/tags carries the manifest digest of
+    what the name resolves to right now; a transformers checkpoint carries the HF commit it was loaded
+    from. Anything else is `unknown` — recorded honestly, and an unknown identity refuses to resume a
+    non-empty file.
+    """
+    declared = getattr(be, "weights_digest", None)  # a backend (or a test stub) may state it directly
+    if declared:
+        return str(declared)
+    commit = getattr(getattr(getattr(be, "model", None), "config", None), "_commit_hash", None)
+    if commit:
+        return f"hf:{getattr(be, 'checkpoint', '')}@{commit}"
+    if getattr(be, "flavor", "") == "ollama":
+        import httpx
+
+        base = be.base_url
+        root = base[: -len("/v1")] if base.endswith("/v1") else base
+        try:
+            models = httpx.get(root + "/api/tags", timeout=10).json().get("models", [])
+        except Exception as exc:
+            return f"unknown: /api/tags unreachable ({type(exc).__name__})"
+        for m in models:
+            if be.model in (m.get("name"), m.get("model")):
+                return f"ollama:{m['digest']}"
+        return f"unknown: {be.model!r} not in /api/tags"
+    return "unknown: backend does not report a weights digest"
+
+
+def _code_identity(task: str, be) -> str:
+    """The source that builds this task's requests and parses its answers."""
+    import importlib
+
+    from . import runner as _runner
+
+    task_mod = "tagging" if task == "perf" else task
+    modules = [_runner, importlib.import_module(f"vlm_eval.tasks.{task_mod}")]
+    if be is not None:
+        modules.append(sys.modules.get(type(be).__module__))
+    return provenance.code_identity([m for m in modules if m])
+
+
+def _fingerprint(
+    task: str, cfg, prompts: dict, served_name: str | None, payload, *, be=None, extra=None, images=None
+) -> provenance.RunFingerprint:
+    """The payload is what was actually sent — rendered prompt and schema, not only the source texts.
+
+    `images` is the set of files this task will actually read; the digest is over those, per task, so
+    replacing an image a task never touches does not block resuming it.
+    """
+    return provenance.RunFingerprint(
+        task=task,
+        served_name=served_name,
+        chunk_size=cfg.chunk_size,
+        individual=tuple(cfg.individual),
+        extra_output_tokens=cfg.extra_output_tokens,
+        prompt_digest=provenance.digest_of(payload),
+        coords=cfg.coords if task == "grounding" else None,
+        backend=type(be).__name__ if be is not None else "",
+        checkpoint=getattr(be, "checkpoint", None),
+        logprobs=bool(getattr(cfg, "logprobs", False)),
+        image_prep=_image_prep(),
+        images_digest=dataset.images_digest(images),
+        route=_route(be),
+        code=_code_identity(task, be),
+        model_identity=_model_identity(be),
+        extra=extra or {},
+    )
+
+
 def run_task(be, *, task: str, model: str, cfg, limit=None, workers=1, repeats=1) -> None:
     """Run one task with one backend. The single place that knows how a task is dispatched.
 
@@ -113,32 +232,82 @@ def run_task(be, *, task: str, model: str, cfg, limit=None, workers=1, repeats=1
     prompts = dataset.load_prompts()
     items = [it for it in dataset.load_manifest() if it.path.exists()]
 
+    served = getattr(be, "name", None)
     if task == "tagging":
         tags = dataset.load_tags()
+        out = runner.tagging_out(model, cfg.chunk_size)
+        # The same shape the task itself is handed: {slug: question_text}, one chunk of it.
+        sample = {t["slug"]: t["question_text"] for t in tags[: cfg.chunk_size]}
+        provenance.check(
+            out,
+            _fingerprint(
+                task,
+                cfg,
+                prompts,
+                served,
+                {
+                    **_tagging_identity(tags, items),
+                    "rendered": tagging.prompt_text(sample),
+                    "schema": tagging.boolean_schema(sample),
+                },
+                be=be,
+                images=items,
+            ),
+        )
         runner.run_over_items(
             items,
             lambda it: runner.run_tagging_one(be, it, tags, cfg),
-            runner.tagging_out(model, cfg.chunk_size),
+            out,
             repeats=repeats,
             workers=workers,
             limit=limit,
         )
     elif task == "captions":
         cp = prompts.get("caption_prompts") or captions.DEFAULT_PROMPTS
+        out = runner.captions_out(model)
+        provenance.check(
+            out,
+            _fingerprint(
+                task,
+                cfg,
+                prompts,
+                served,
+                {
+                    "rendered": captions.prompt_text(cp, prompts.get("prompt_templates")),
+                    "schema": captions.schema(cp),
+                },
+                be=be,
+                images=items,
+            ),
+        )
         runner.run_over_items(
             items,
             lambda it: runner.run_captions_one(be, it, cp, cfg, prompts.get("prompt_templates")),
-            runner.captions_out(model),
+            out,
             repeats=1,
             workers=workers,
             limit=limit,
         )
     elif task == "grounding":
         targets = grounding.load_targets()
+        out = runner.grounding_out(model)
+        first = next(iter(targets.items()), ("", ""))
+        provenance.check(
+            out,
+            _fingerprint(
+                task,
+                cfg,
+                prompts,
+                served,
+                {"targets": targets, "rendered": grounding.prompt_text(*first), "schema": grounding.SCHEMA},
+                be=be,
+                images=items,
+            ),
+        )
         runner.run_over_items(
             items,
             lambda it: runner.run_grounding_one(be, it, targets, cfg),
-            runner.grounding_out(model),
+            out,
             repeats=1,
             workers=workers,
             limit=limit,
@@ -147,11 +316,29 @@ def run_task(be, *, task: str, model: str, cfg, limit=None, workers=1, repeats=1
         prompt = (prompts.get("prompt_templates") or {}).get("multi_image_summary") or summary.DEFAULT_PROMPT
         props = dataset.load_jsonl(dataset.DATA / "properties.jsonl")
         out = runner.summary_out(model)
+        provenance.check(
+            out,
+            _fingerprint(
+                task,
+                cfg,
+                prompts,
+                served,
+                {
+                    "rendered": prompt,
+                    "schema": summary.SCHEMA,
+                    # Which images belong to which listing, in which order: the byte digest cannot see
+                    # a regrouping or a reshuffle that reuses the same files.
+                    "listings": [[str(pr["property_job_id"]), [str(i) for i in pr["image_ids"]]] for pr in props],
+                },
+                be=be,
+                images=_summary_items(),
+            ),
+        )
         done = {r["property_job_id"] for r in dataset.load_jsonl(out)}
         for p in props:
             if p["property_job_id"] in done:
                 continue
-            row = runner.run_summary_one(be, p, prompt, dataset.IMAGES)
+            row = runner.run_summary_one(be, p, prompt, dataset.IMAGES, cfg.extra_output_tokens)
             runner._append(out, row)
             print(
                 f"property {p['property_job_id']}: {row['n_images']} images, {row['latency_s']}s, "
@@ -178,6 +365,7 @@ def _pipeline_cfg(a, *, workers=1, logprobs=True, coords="norm1000"):
         logprobs=logprobs,
         coords=coords,
         limit=getattr(a, "limit", None),
+        extra_output_tokens=int(getattr(a, "extra_output_tokens", 0) or 0),
     )
 
 
@@ -198,6 +386,22 @@ def cmd_perf(a) -> None:
     out = runner.RUNS / a.model / f"perf_c{a.concurrency}.jsonl"
     if out.exists():
         out.unlink()
+    provenance.sidecar(out).unlink(missing_ok=True)
+    # A throughput figure is meaningless without the machine and the concurrency that produced it, so
+    # both go in the fingerprint rather than in a sentence somebody writes into a report by hand.
+    provenance.check(
+        out,
+        _fingerprint(
+            "perf",
+            cfg,
+            dataset.load_prompts(),
+            getattr(be, "name", None),
+            _tagging_identity(tags, items),
+            be=be,
+            extra={"concurrency": a.concurrency, "hardware": platform.platform(), "machine": platform.machine()},
+            images=items,
+        ),
+    )
     t0 = time.perf_counter()
     n = runner.run_over_items(
         items, lambda it: runner.run_tagging_one(be, it, tags, cfg), out, repeats=1, workers=a.concurrency
@@ -264,6 +468,23 @@ def cmd_metrics(a) -> None:
             "mean_words": round(sum(len((r.get("summary") or "").split()) for r in sm) / len(sm), 1),
             "latency": metrics.latency_stats([r["latency_s"] for r in sm]),
         }
+    # How much of each task the model never got to finish, in one place. Truncation used to be visible
+    # only for tagging, so a caption run that spent its budget thinking looked simply short.
+    out["completion"] = {
+        task: metrics.truncation(rows)
+        for task, rows in (("tagging", t15), ("captions", caps), ("grounding", gr), ("summary", sm))
+        if rows
+    }
+    out["provenance"] = {
+        task: provenance.describe(path)
+        for task, path in (
+            ("tagging", _primary_tagging_run(a.model)),
+            ("captions", runner.captions_out(a.model)),
+            ("grounding", runner.grounding_out(a.model)),
+            ("summary", runner.summary_out(a.model)),
+        )
+        if path.exists()
+    }
     perfs = sorted(d.glob("perf_c*.json"))
     if perfs:
         best = max((json.loads(p.read_text()) for p in perfs), key=lambda r: r.get("images_per_hour_measured") or 0)
@@ -287,11 +508,12 @@ def cmd_florence(a) -> None:
     from PIL import Image as PILImage
 
     from .backends.florence_hf import FlorenceBackend
-    from .tasks import tagging
 
     _check_task("florence", a.task)
     be = FlorenceBackend(a.checkpoint, device=a.device)
     model = a.model or be.name
+    a.model = model
+    cfg = _pipeline_cfg(a, workers=1, logprobs=False, coords="abs")
     items = [it for it in dataset.load_manifest() if it.path.exists()]
     tags = dataset.load_tags()
 
@@ -350,6 +572,24 @@ def cmd_florence(a) -> None:
         # Stored under production's batch size so `metrics` and `report` find it alongside the others,
         # even though open-vocabulary detection asks one phrase at a time.
         out = runner.tagging_out(model, pipeline_config.load().chunk_size)
+    # Florence writes its own rows, but it goes through the same provenance gate as everything else: a
+    # backend that skips the gate is a backend whose files can silently mix two experiments.
+    provenance.check(
+        out,
+        _fingerprint(
+            a.task,
+            cfg,
+            dataset.load_prompts(),
+            getattr(be, "name", None),
+            {
+                "targets": getattr(be, "last_targets", None),
+                "task": a.task,
+                **(_tagging_identity(tags, items) if a.task == "tagging" else {}),
+            },
+            be=be,
+            images=items,
+        ),
+    )
     runner.run_over_items(items, fn, out, repeats=a.repeats, workers=1, limit=a.limit)
 
 
@@ -415,14 +655,20 @@ def cmd_hf(a) -> None:
                     "errors": [],
                 }
 
-            runner.run_over_items(
-                items,
-                fn,
-                runner.tagging_out(model, cfg.chunk_size),
-                repeats=a.repeats,
-                workers=1,
-                limit=a.limit,
+            out = runner.tagging_out(model, cfg.chunk_size)
+            provenance.check(
+                out,
+                _fingerprint(
+                    "tagging",
+                    cfg,
+                    dataset.load_prompts(),
+                    getattr(be, "name", None),
+                    {**_tagging_identity(tags, items), "style": "one question per call"},
+                    be=be,
+                    images=items,
+                ),
             )
+            runner.run_over_items(items, fn, out, repeats=a.repeats, workers=1, limit=a.limit)
         elif a.task == "captions":
 
             def fn(it):
@@ -439,7 +685,20 @@ def cmd_hf(a) -> None:
                     "errors": [],
                 }
 
-            runner.run_over_items(items, fn, runner.captions_out(model), repeats=1, workers=1, limit=a.limit)
+            out = runner.captions_out(model)
+            provenance.check(
+                out,
+                _fingerprint(
+                    "captions",
+                    cfg,
+                    dataset.load_prompts(),
+                    getattr(be, "name", None),
+                    {"rendered": ["caption en", "describe en"], "schema": None},
+                    be=be,
+                    images=items,
+                ),
+            )
+            runner.run_over_items(items, fn, out, repeats=1, workers=1, limit=a.limit)
         else:  # pragma: no cover - _check_task rejects anything else before we get here
             sys.exit(f"unhandled task for paligemma: {a.task}")
 

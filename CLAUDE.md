@@ -49,6 +49,19 @@ Every change ends with three questions, answered explicitly rather than assumed:
 Commands that talk to a model or a database are verified by **running them**, not by their `--help`.
 Say plainly which ones were not run and why (a 17 GB download is a reason; "should work" is not).
 
+The README carries a table of what has and has not been exercised against a real model. **Update it in
+the same change** that runs a path for the first time, or that adds one. A public repository that
+implies more testing than happened is worse than one that admits the gap.
+
+After writing or regenerating a report, re-derive it:
+
+```bash
+python scripts/verify_published_figures.py
+```
+
+It recomputes every published number from `runs/` and `data/` importing nothing from this package. A
+MISMATCH means the report is wrong or the data moved on — it has already caught the latter once.
+
 ## Never commit
 
 `.env`, `data/`, `runs/`, `reports/`, `decisions_*.json` — client images, database exports, prompt texts
@@ -76,6 +89,17 @@ because "47" read as a number of photos.
 ## Measurement discipline
 
 This is an evaluation tool; a wrong number is worse than no number.
+
+- **Every code path that writes run rows goes through `provenance.check()`.** No exceptions for "small"
+  backends — a test walks the CLI's syntax tree and fails on any `run_over_items` call without a check.
+- **The fingerprint's composition is frozen while runs are in flight.** Adding a field changes every
+  digest and refuses every resume, so batch such changes between sweeps, never during one.
+- **Truncation and failure are read from the `completion` record**, never by matching error-message
+  text. If a new task variant writes rows, it writes `completion_record(...)` too.
+- **A model name is not a model.** The fingerprint stores the weights digest (Ollama manifest / HF
+  commit); a backend that cannot prove one records `unknown` and is refused resume of non-empty files.
+- **`legacy_unknown` is permanent.** Nothing may promote a pre-provenance file to verified; if a clean
+  measurement is needed, the file is archived and recomputed.
 
 - Every figure in a report traces back to a file in `runs/` or `data/`. If it was computed ad hoc, it
   belongs in the code instead — that is why `vlm-eval economics` exists.
