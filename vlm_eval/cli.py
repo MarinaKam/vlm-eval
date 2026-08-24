@@ -1,12 +1,16 @@
-"""vlm-eval CLI.
+"""vlm-eval CLI. Models are named by preset (see models.json), so commands stay short:
 
-vlm-eval download                                  # fetch data/images from manifest (optimized like production)
-vlm-eval run --model qwen2.5-vl-7b --base-url http://localhost:8000/v1 --task tagging [--chunk 15|0] [--repeats 3]
-vlm-eval run ... --task captions|grounding|summary
-vlm-eval perf --model ... --concurrency 4 --n 40      # throughput at concurrency (tagging, chunk 15)
-vlm-eval metrics --model qwen2.5-vl-7b               # -> runs/<model>/metrics.json
-vlm-eval report --model qwen2.5-vl-7b                # -> reports/<model>.md (needs cards/<model>.json)
-vlm-eval compare --models a b c                      # -> reports/comparison.md
+  vlm-eval download                     fetch the images named in the manifest
+  vlm-eval run qwen3 tagging            run a task  (also: captions | grounding | summary)
+  vlm-eval run qwen3 tagging --chunk 0  every question in one call
+  vlm-eval metrics qwen3                compute metrics       -> runs/<model>/metrics.json
+  vlm-eval review qwen3                 judge the disagreements yourself
+  vlm-eval report qwen3                 per-model report      -> reports/<model>.md
+  vlm-eval compare qwen3 qwen2.5        comparison table      -> reports/comparison.md
+  vlm-eval economics                    self-host vs API      -> reports/economics.md
+
+Any preset field can be overridden with a flag (--served-name, --base-url, --flavor, --coords), and a
+name that is not a preset is used as-is.
 """
 
 import argparse
@@ -18,6 +22,28 @@ from . import dataset, metrics, report, review, runner
 from .backends.openai_compat import OpenAICompatBackend
 from .config import REPORTS
 from .tasks import captions, grounding, summary
+
+PRESETS_FILE = dataset.ROOT / "models.json"
+
+
+def _presets() -> dict:
+    if not PRESETS_FILE.exists():
+        return {}
+    return {k: v for k, v in json.loads(PRESETS_FILE.read_text()).items() if not k.startswith("_")}
+
+
+def _resolve(a) -> None:
+    """Fill in model connection details from a preset, unless the flag was given explicitly."""
+    preset = _presets().get(getattr(a, "model", None) or "", {})
+    a.model = preset.get("run_name", a.model)
+    for field, default in (
+        ("served_name", None),
+        ("base_url", "http://localhost:8000/v1"),
+        ("flavor", "vllm"),
+        ("coords", "norm1000"),
+    ):
+        if getattr(a, field, None) is None:
+            setattr(a, field, preset.get(field, default))
 
 
 def _backend(a) -> OpenAICompatBackend:
@@ -36,6 +62,7 @@ def cmd_download(a) -> None:
 
 
 def cmd_run(a) -> None:
+    _resolve(a)
     be = _backend(a)
     cfg = runner.RunConfig(
         model=a.model,
@@ -94,6 +121,7 @@ def cmd_run(a) -> None:
 
 
 def cmd_perf(a) -> None:
+    _resolve(a)
     be = _backend(a)
     tags = dataset.load_tags()
     cfg = runner.RunConfig(model=a.model, chunk_size=15, logprobs=False)
@@ -118,6 +146,7 @@ def cmd_perf(a) -> None:
 
 
 def cmd_metrics(a) -> None:
+    _resolve(a)
     gem = dataset.gemini_tags_by_image()
     d = runner.RUNS / a.model
     out: dict = {"model": a.model, "tagging": {}, "captions": {}, "grounding": {}, "summary": {}, "perf": {}}
@@ -238,6 +267,7 @@ def cmd_florence(a) -> None:
 
 
 def cmd_review(a) -> None:
+    _resolve(a)
     gem = dataset.gemini_tags_by_image()
     rows = dataset.load_jsonl(runner.tagging_out(a.model, 15))
     if a.decisions:
@@ -247,8 +277,7 @@ def cmd_review(a) -> None:
     cases = review.sample_by_tag(review.disagreements(rows, gem, dataset.load_tags()), per_tag=a.per_tag)
     out = review.build_review_html(a.model, cases, REPORTS / "review" / f"{a.model}.html")
     print(
-        f"{len(cases)} cases -> open {out} in a browser, then: vlm-eval review --model {a.model} "
-        f"--decisions <downloaded json>"
+        f"{len(cases)} cases -> open {out} in a browser, then: vlm-eval review {a.model} --decisions <downloaded json>"
     )
 
 
@@ -354,12 +383,43 @@ def cmd_hf(a) -> None:
     cmd_metrics(subprocess_metrics)
 
 
+def cmd_economics(a) -> None:
+    from .economics import Inputs, render
+
+    path = dataset.DATA / "economics.json" if a.config is None else dataset.ROOT / a.config
+    if not path.exists():
+        sys.exit(
+            f"{path} not found. Create it with the numbers you measured, for example:\n"
+            + json.dumps(
+                {
+                    "api_cost_per_image": 0.001446,
+                    "api_cost_per_image_optimized": 0.000707,
+                    "gpu_usd_per_hour": 0.5832,
+                    "gpu_images_per_hour": 2000,
+                    "gpu_name": "L4 (spot)",
+                    "peak_hour_images": 12404,
+                    "busy_hours_pct": 8.6,
+                    "scenarios": [["last 3 months", 23466], ["current pace", 61072]],
+                },
+                indent=2,
+            )
+        )
+    cfg = json.loads(path.read_text())
+    cfg["scenarios"] = [tuple(x) for x in cfg.get("scenarios", [])]
+    note = cfg.pop("note", "")
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    out = REPORTS / "economics.md"
+    out.write_text(render(Inputs(**cfg), currency_note=note))
+    print(f"wrote {out}")
+
+
 def _card(model: str) -> dict:
     p = REPORTS / "cards" / f"{model}.json"
     return json.loads(p.read_text()) if p.exists() else {"model": model, "name": model}
 
 
 def cmd_report(a) -> None:
+    _resolve(a)
     m = json.loads((runner.RUNS / a.model / "metrics.json").read_text())
     REPORTS.mkdir(parents=True, exist_ok=True)
     out = REPORTS / f"{a.model}.md"
@@ -368,6 +428,7 @@ def cmd_report(a) -> None:
 
 
 def cmd_compare(a) -> None:
+    a.models = [_presets().get(m, {}).get("run_name", m) for m in a.models]
     cards = [_card(m) for m in a.models]
     ms = [json.loads((runner.RUNS / m / "metrics.json").read_text()) for m in a.models]
     out = REPORTS / "comparison.md"
@@ -383,47 +444,43 @@ def main(argv=None) -> None:
     s.add_argument("--force", action="store_true")
     s.set_defaults(fn=cmd_download)
 
-    def common(sp):
-        sp.add_argument("--model", required=True, help="run folder name, e.g. qwen2.5-vl-7b")
-        sp.add_argument("--served-name", default=None, help="model name as served (default: --model)")
-        sp.add_argument("--base-url", default="http://localhost:8000/v1")
-        sp.add_argument("--flavor", choices=["vllm", "ollama"], default="vllm")
+    def conn(sp):
+        """Connection overrides — normally supplied by the preset."""
+        sp.add_argument("--served-name", default=None, help="model name as the server exposes it")
+        sp.add_argument("--base-url", default=None)
+        sp.add_argument("--flavor", choices=["vllm", "ollama"], default=None)
 
-    s = sub.add_parser("run")
-    common(s)
-    s.add_argument("--task", choices=["tagging", "captions", "grounding", "summary"], required=True)
+    s = sub.add_parser("run", help="run a task against a model")
+    s.add_argument("model", help="preset name from models.json, or a run folder name")
+    s.add_argument("task", choices=["tagging", "captions", "grounding", "summary"])
+    conn(s)
     s.add_argument("--chunk", type=int, default=15, help="questions per call, 0 = all in one")
     s.add_argument("--repeats", type=int, default=1)
     s.add_argument("--workers", type=int, default=1)
     s.add_argument("--limit", type=int, default=None)
     s.add_argument("--no-logprobs", action="store_true")
-    s.add_argument("--coords", choices=["abs", "norm1000"], default="norm1000")
+    s.add_argument("--coords", choices=["abs", "norm1000"], default=None)
     s.set_defaults(fn=cmd_run)
 
-    s = sub.add_parser("perf")
-    common(s)
+    s = sub.add_parser("perf", help="throughput at a given concurrency")
+    s.add_argument("model")
+    conn(s)
     s.add_argument("--concurrency", type=int, default=4)
     s.add_argument("--n", type=int, default=40)
     s.set_defaults(fn=cmd_perf)
 
-    s = sub.add_parser("florence")
-    s.add_argument("--task", choices=["tagging", "captions", "grounding"], required=True)
-    s.add_argument("--checkpoint", default="microsoft/Florence-2-large")
+    s = sub.add_parser("florence", help="Florence-2 via transformers (no server)")
+    s.add_argument("task", choices=["tagging", "captions", "grounding"])
+    s.add_argument("--checkpoint", default="florence-community/Florence-2-large")
     s.add_argument("--model", default=None, help="run folder name (default: checkpoint basename)")
     s.add_argument("--device", default=None)
     s.add_argument("--repeats", type=int, default=1)
     s.add_argument("--limit", type=int, default=None)
     s.set_defaults(fn=cmd_florence)
 
-    s = sub.add_parser("review")
-    s.add_argument("--model", required=True)
-    s.add_argument("--per-tag", type=int, default=5)
-    s.add_argument("--decisions", nargs="*", help="decision JSON files downloaded from the review page")
-    s.set_defaults(fn=cmd_review)
-
-    s = sub.add_parser("hf")
-    s.add_argument("--backend", choices=["internvl", "paligemma"], required=True)
-    s.add_argument("--task", choices=["tagging", "captions", "grounding", "summary"], required=True)
+    s = sub.add_parser("hf", help="InternVL / PaliGemma via transformers (no server)")
+    s.add_argument("backend", choices=["internvl", "paligemma"])
+    s.add_argument("task", choices=["tagging", "captions", "grounding", "summary"])
     s.add_argument("--checkpoint", default=None)
     s.add_argument("--model", default=None)
     s.add_argument("--device", default=None)
@@ -432,15 +489,27 @@ def main(argv=None) -> None:
     s.add_argument("--limit", type=int, default=None)
     s.set_defaults(fn=cmd_hf)
 
-    s = sub.add_parser("metrics")
-    s.add_argument("--model", required=True)
+    s = sub.add_parser("review", help="judge model-vs-reference disagreements by eye")
+    s.add_argument("model")
+    s.add_argument("--per-tag", type=int, default=5)
+    s.add_argument("--decisions", nargs="*", help="decision files downloaded from the review page")
+    s.set_defaults(fn=cmd_review)
+
+    s = sub.add_parser("metrics", help="compute metrics from the run files")
+    s.add_argument("model")
     s.set_defaults(fn=cmd_metrics)
-    s = sub.add_parser("report")
-    s.add_argument("--model", required=True)
+
+    s = sub.add_parser("report", help="render the per-model report")
+    s.add_argument("model")
     s.set_defaults(fn=cmd_report)
-    s = sub.add_parser("compare")
-    s.add_argument("--models", nargs="+", required=True)
+
+    s = sub.add_parser("compare", help="render the comparison table")
+    s.add_argument("models", nargs="+")
     s.set_defaults(fn=cmd_compare)
+
+    s = sub.add_parser("economics", help="self-host vs pay-per-call, from measured inputs")
+    s.add_argument("--config", default=None, help="default: <data>/economics.json")
+    s.set_defaults(fn=cmd_economics)
 
     a = p.parse_args(argv)
     a.fn(a)
