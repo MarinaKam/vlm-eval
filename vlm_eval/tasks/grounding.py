@@ -12,11 +12,25 @@ from typing import Any
 
 from .tagging import _loads_lenient
 
-TARGETS = {
-    "kitchen_island": "kitchen island (a freestanding or built-in island counter)",
-    "fireplace": "fireplace",
-    "radiator": "radiator (wall-mounted heating radiator)",
-}
+# What to localise is a property of the dataset, not of this code: it comes from
+# `data/grounding_targets.json` ({"slug": "phrase to search for"}). No domain lives here.
+TARGETS: dict[str, str] = {}
+
+
+def load_targets(path=None) -> dict[str, str]:
+    """Detection targets for this dataset. Empty and explicit beats a guess about someone's domain."""
+    from ..dataset import DATA
+
+    path = path or DATA / "grounding_targets.json"
+    if not path.exists():
+        raise SystemExit(
+            f"{path} not found. Grounding needs to know what to look for — write a JSON object mapping "
+            'a tag slug to the phrase to search for, e.g. {"fireplace": "fireplace"}. Use slugs that '
+            "exist in tags.json so the result can be scored against the reference."
+        )
+    import json
+
+    return json.loads(path.read_text())
 
 
 def prompt_text(label: str, description: str) -> str:

@@ -2,7 +2,8 @@
 
   vlm-eval status                       what is measured so far, what is missing
   vlm-eval download                     fetch the images named in the manifest
-  vlm-eval run qwen3 tagging            run a task  (also: captions | grounding | summary)
+  vlm-eval run qwen3 tagging            run one task (also: captions | grounding | summary)
+  vlm-eval sweep qwen3                  run every task for a model, cheapest first
   vlm-eval run qwen3 tagging --chunk 0  every question in one call
   vlm-eval metrics qwen3                compute metrics       -> runs/<model>/metrics.json
   vlm-eval review qwen3                 judge the disagreements yourself
@@ -25,7 +26,7 @@ import json
 import sys
 import time
 
-from . import dataset, metrics, report, review, runner
+from . import dataset, metrics, pipeline_config, report, review, runner
 from .backends.openai_compat import OpenAICompatBackend
 from .config import REPORTS
 from .tasks import captions, grounding, summary
@@ -71,9 +72,18 @@ def cmd_download(a) -> None:
 def cmd_run(a) -> None:
     _resolve(a)
     be = _backend(a)
+    prompts = dataset.load_prompts()
+    pipe = pipeline_config.load(prompts)
+    if not getattr(a, "allow_defaults", False):
+        pipe.strict()
+    elif pipe.defaulted:
+        print(f"WARNING: guessing {', '.join(pipe.defaulted)} — these may not match production", flush=True)
+    # `--chunk` is an experiment knob; without it the harness uses production's own batch size.
+    chunk = a.chunk if a.chunk is not None else pipe.chunk_size
     cfg = runner.RunConfig(
         model=a.model,
-        chunk_size=a.chunk,
+        chunk_size=chunk,
+        individual=pipe.individual_questions,
         repeats=a.repeats,
         workers=a.workers,
         logprobs=not a.no_logprobs,
@@ -81,13 +91,12 @@ def cmd_run(a) -> None:
         limit=a.limit,
     )
     items = [it for it in dataset.load_manifest() if it.path.exists()]
-    prompts = dataset.load_prompts()
     if a.task == "tagging":
         tags = dataset.load_tags()
         runner.run_over_items(
             items,
             lambda it: runner.run_tagging_one(be, it, tags, cfg),
-            runner.tagging_out(a.model, a.chunk),
+            runner.tagging_out(a.model, chunk),
             repeats=a.repeats,
             workers=a.workers,
             limit=a.limit,
@@ -96,16 +105,17 @@ def cmd_run(a) -> None:
         cp = prompts.get("caption_prompts") or captions.DEFAULT_PROMPTS
         runner.run_over_items(
             items,
-            lambda it: runner.run_captions_one(be, it, cp, cfg),
+            lambda it: runner.run_captions_one(be, it, cp, cfg, prompts.get("prompt_templates")),
             runner.captions_out(a.model),
             repeats=1,
             workers=a.workers,
             limit=a.limit,
         )
     elif a.task == "grounding":
+        targets = grounding.load_targets()
         runner.run_over_items(
             items,
-            lambda it: runner.run_grounding_one(be, it, grounding.TARGETS, cfg),
+            lambda it: runner.run_grounding_one(be, it, targets, cfg),
             runner.grounding_out(a.model),
             repeats=1,
             workers=a.workers,
@@ -152,12 +162,26 @@ def cmd_perf(a) -> None:
     print(json.dumps(res))
 
 
+def _primary_tagging_run(model: str):
+    """The tagging run made with production's batch size — found, not assumed.
+
+    Hardcoding 15 here was the same mistake as hardcoding it in the runner: change the batch size in
+    production and the metrics would quietly read a file that no longer exists.
+    """
+    pipe = pipeline_config.load()
+    preferred = runner.tagging_out(model, pipe.chunk_size)
+    if preferred.exists():
+        return preferred
+    others = sorted(p for p in (runner.RUNS / model).glob("tagging_chunk*.jsonl") if not p.stem.endswith("chunkall"))
+    return others[0] if others else preferred
+
+
 def cmd_metrics(a) -> None:
     _resolve(a)
     gem = dataset.gemini_tags_by_image()
     d = runner.RUNS / a.model
     out: dict = {"model": a.model, "tagging": {}, "captions": {}, "grounding": {}, "summary": {}, "perf": {}}
-    t15 = dataset.load_jsonl(runner.tagging_out(a.model, 15))
+    t15 = dataset.load_jsonl(_primary_tagging_run(a.model))
     tall = dataset.load_jsonl(runner.tagging_out(a.model, 0))
     if t15:
         out["tagging"]["agreement"] = metrics.tagging_agreement(t15, gem)
@@ -276,7 +300,7 @@ def cmd_florence(a) -> None:
 def cmd_review(a) -> None:
     _resolve(a)
     gem = dataset.gemini_tags_by_image()
-    rows = dataset.load_jsonl(runner.tagging_out(a.model, 15))
+    rows = dataset.load_jsonl(_primary_tagging_run(a.model))
     if a.decisions:
         print(review.apply_decisions([dataset.ROOT / f for f in a.decisions]))
         print(review.manual_agreement(rows, gem))
@@ -410,6 +434,99 @@ def cmd_volume(a) -> None:
     sys.exit(_script("run_source_manage.py", *args))
 
 
+def cmd_sweep(a) -> None:
+    """Run every task for one model, cheapest first.
+
+    Ordered so that stopping early still leaves every capability measured — only the sample size for
+    the expensive tasks shrinks. Everything resumes, so re-running picks up where it stopped.
+    """
+    import argparse as _argparse
+
+    # Models without a server (Florence-2, InternVL, PaliGemma) go through their own commands, and
+    # not all of them do every task: Florence-2 has no multi-image input, PaliGemma is single-turn.
+    if a.via != "server":
+        _sweep_local(a)
+        return
+
+    stages = [
+        ("summary", {"task": "summary", "limit": None}),
+        ("grounding", {"task": "grounding", "limit": a.grounding}),
+        ("captions", {"task": "captions", "limit": a.captions}),
+        ("all questions in one call", {"task": "tagging", "limit": a.chunk_all, "chunk": 0}),
+        ("tagging", {"task": "tagging", "limit": a.tagging}),
+        ("consistency", {"task": "tagging", "limit": a.consistency, "repeats": 3}),
+    ]
+    for label, opts in stages:
+        if opts.get("limit") == 0:
+            print(f"--- skipping {label}")
+            continue
+        n = opts.get("limit")
+        print(f"\n=== {a.model}: {label}" + (f" ({n} images)" if n else "") + " ===", flush=True)
+        run_args = _argparse.Namespace(
+            model=a.model,
+            served_name=a.served_name,
+            base_url=a.base_url,
+            flavor=a.flavor,
+            coords=a.coords,
+            task=opts["task"],
+            chunk=opts.get("chunk", 15),
+            repeats=opts.get("repeats", 1),
+            workers=a.workers,
+            limit=opts.get("limit"),
+            no_logprobs=a.no_logprobs,
+        )
+        cmd_run(run_args)
+
+    cmd_metrics(_argparse.Namespace(model=a.model))
+    cmd_status(_argparse.Namespace())
+
+
+def _sweep_local(a) -> None:
+    """Full run for a transformers-backed model, skipping the tasks its architecture cannot do."""
+    import argparse as _argparse
+
+    if a.via == "florence":
+        supported = [("captions", a.captions), ("grounding", a.grounding), ("tagging", a.tagging)]
+        run = cmd_florence
+        base = {
+            "checkpoint": a.checkpoint or "florence-community/Florence-2-large",
+            "model": a.model if a.model != a.via else None,
+            "device": a.device,
+            "repeats": 1,
+        }
+        note = "Florence-2 takes one image at a time, so there is no property summary."
+    else:
+        supported = [("captions", a.captions), ("tagging", a.tagging)]
+        if a.via == "internvl":
+            supported = [("summary", None), ("grounding", a.grounding), *supported]
+            note = ""
+        else:
+            note = "PaliGemma is single-image and single-turn: no summary, and one call per tag."
+        run = cmd_hf
+        base = {
+            "backend": a.via,
+            "checkpoint": a.checkpoint,
+            "model": a.model if a.model != a.via else None,
+            "device": a.device,
+            "chunk": 15,
+            "repeats": 1,
+        }
+
+    if note:
+        print(note, flush=True)
+    model_name = None
+    for task, limit in supported:
+        if limit == 0:
+            print(f"--- skipping {task}")
+            continue
+        print(f"\n=== {a.via}: {task}" + (f" ({limit} images)" if limit else "") + " ===", flush=True)
+        ns = _argparse.Namespace(task=task, limit=limit, **base)
+        run(ns)
+        model_name = ns.model or model_name
+    if model_name:
+        cmd_metrics(_argparse.Namespace(model=model_name))
+
+
 def cmd_status(a) -> None:
     """What has been measured so far, and what is missing — so the answer never needs `wc -l`."""
     import csv
@@ -460,6 +577,17 @@ def cmd_status(a) -> None:
             print(f"  {model_dir.name}: {', '.join(parts) if parts else 'empty'}{has_metrics}")
     else:
         print("  none yet")
+
+    targets = data / "grounding_targets.json"
+    print(
+        f"  {'grounding targets':<15} "
+        + (f"{len(json.loads(targets.read_text())):>6}" if targets.exists() else "missing")
+    )
+
+    # The settings the harness will actually apply — shown so a mismatch with production is visible
+    # rather than discovered three hours into a run.
+    print("\npipeline settings replayed from the export:")
+    print(pipeline_config.load().describe())
 
     econ = data / "economics.json"
     print(f"\neconomics config: {'present' if econ.exists() else 'missing (see `vlm-eval economics`)'}")
@@ -622,13 +750,44 @@ def main(argv=None) -> None:
     s.add_argument("model", help="preset name from models.json, or a run folder name")
     s.add_argument("task", choices=["tagging", "captions", "grounding", "summary"])
     conn(s)
-    s.add_argument("--chunk", type=int, default=15, help="questions per call, 0 = all in one")
+    s.add_argument(
+        "--chunk",
+        type=int,
+        default=None,
+        help="questions per call; default is production's own setting, 0 = all in one",
+    )
+    s.add_argument(
+        "--allow-defaults",
+        action="store_true",
+        help="run even if pipeline settings are missing from the export (they get guessed)",
+    )
     s.add_argument("--repeats", type=int, default=1)
     s.add_argument("--workers", type=int, default=1)
     s.add_argument("--limit", type=int, default=None)
     s.add_argument("--no-logprobs", action="store_true")
     s.add_argument("--coords", choices=["abs", "norm1000"], default=None)
     s.set_defaults(fn=cmd_run)
+
+    s = sub.add_parser("sweep", help="run every task for one model, cheapest first, resumable")
+    s.add_argument("model", help="preset name from models.json, or a run folder name")
+    conn(s)
+    s.add_argument("--tagging", type=int, default=500, help="images for the main tagging run (0 = skip)")
+    s.add_argument("--captions", type=int, default=100)
+    s.add_argument("--grounding", type=int, default=100)
+    s.add_argument("--chunk-all", type=int, default=60, help="images for the all-in-one-call comparison")
+    s.add_argument("--consistency", type=int, default=0, help="images to run 3x (0 = skip)")
+    s.add_argument("--workers", type=int, default=1)
+    s.add_argument("--no-logprobs", action="store_true")
+    s.add_argument("--coords", choices=["abs", "norm1000"], default=None)
+    s.add_argument(
+        "--via",
+        choices=["server", "florence", "internvl", "paligemma"],
+        default="server",
+        help="how to reach the model: an OpenAI-compatible server (default) or transformers",
+    )
+    s.add_argument("--checkpoint", default=None, help="for --via florence|internvl|paligemma")
+    s.add_argument("--device", default=None)
+    s.set_defaults(fn=cmd_sweep)
 
     s = sub.add_parser("perf", help="throughput at a given concurrency")
     s.add_argument("model")

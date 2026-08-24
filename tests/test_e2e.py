@@ -69,6 +69,24 @@ def workspace(tmp_path, monkeypatch):
             w.writerow([it.image_id, it.url, it.s3_url, it.image_type, "", ""])
 
     (data / "tags.json").write_text(json.dumps(TAGS))
+    # The export carries production's own settings; the harness must use these, not its own constants.
+    (data / "prompts.json").write_text(
+        json.dumps(
+            {
+                "caption_prompts": {"base_caption": "short"},
+                "prompt_templates": {"caption_header": "You are a describing machine."},
+                "processing_config": {
+                    "classification_chunk_size": {"value_int": 2},
+                    "individual_questions": {"value_json": ["garden"]},
+                    "image_optimization_enabled": {"value_bool": True},
+                    "image_optimization_max_dimension": {"value_int": 800},
+                    "image_optimization_jpeg_quality": {"value_int": 54},
+                    "image_optimization_target_size_kb": {"value_int": 600},
+                },
+            }
+        )
+    )
+    (data / "grounding_targets.json").write_text(json.dumps({"pool": "swimming pool"}))
     # Reference: pool present on both; kitchen judged on img-a and absent
     with (data / "gemini_tags.jsonl").open("w") as fh:
         fh.write(
@@ -204,7 +222,9 @@ def test_cli_wiring_end_to_end(workspace, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_backend", lambda a: StubBackend({"pool"}))
 
     cli.main(["run", "stub", "tagging", "--no-logprobs"])
-    assert runner.tagging_out("stub", 15).exists()
+    # Production batches by 2 in this fixture; the harness must follow the export, not its own default.
+    assert runner.tagging_out("stub", 2).exists()
+    assert not runner.tagging_out("stub", 15).exists()
 
     cli.main(["metrics", "stub"])
     saved = json.loads((workspace["runs"] / "stub" / "metrics.json").read_text())
@@ -304,3 +324,202 @@ def test_tagset_agreement_on_no_overlap():
     from vlm_eval import metrics
 
     assert metrics.tagset_agreement({"a": {"x"}}, {"b": {"x"}}) == {"n_images": 0}
+
+
+def test_sweep_runs_every_task_for_any_model(workspace, monkeypatch):
+    """`sweep` is the generic full run: same stages for any preset, and skips what you set to 0."""
+    import argparse
+
+    from vlm_eval import cli
+
+    called = []
+    monkeypatch.setattr(cli, "cmd_run", lambda a: called.append((a.task, a.limit, a.chunk, a.repeats)))
+    monkeypatch.setattr(cli, "cmd_metrics", lambda a: called.append(("metrics", a.model, None, None)))
+    monkeypatch.setattr(cli, "cmd_status", lambda a: None)
+
+    cli.cmd_sweep(
+        argparse.Namespace(
+            model="any-model",
+            served_name=None,
+            base_url=None,
+            flavor=None,
+            coords=None,
+            tagging=500,
+            captions=100,
+            grounding=100,
+            chunk_all=60,
+            consistency=0,
+            workers=1,
+            no_logprobs=True,
+            via="server",
+            checkpoint=None,
+            device=None,
+        )
+    )
+
+    tasks = [c[0] for c in called]
+    # cheapest first, so an interrupted sweep still covers every capability
+    assert tasks == ["summary", "grounding", "captions", "tagging", "tagging", "metrics"]
+    assert called[3][2] == 0  # the all-in-one-call stage asks every question at once
+    assert called[4][1] == 500  # the main tagging run honours --tagging
+    assert called[-1][1] == "any-model"
+
+
+def test_sweep_skips_stages_set_to_zero(workspace, monkeypatch):
+    import argparse
+
+    from vlm_eval import cli
+
+    called = []
+    monkeypatch.setattr(cli, "cmd_run", lambda a: called.append(a.task))
+    monkeypatch.setattr(cli, "cmd_metrics", lambda a: None)
+    monkeypatch.setattr(cli, "cmd_status", lambda a: None)
+
+    cli.cmd_sweep(
+        argparse.Namespace(
+            model="m",
+            served_name=None,
+            base_url=None,
+            flavor=None,
+            coords=None,
+            tagging=0,
+            captions=0,
+            grounding=0,
+            chunk_all=0,
+            consistency=0,
+            workers=1,
+            no_logprobs=False,
+            via="server",
+            checkpoint=None,
+            device=None,
+        )
+    )
+    assert called == ["summary"]  # only the stage with no limit to skip
+
+
+def test_pipeline_config_is_read_from_the_export_not_guessed():
+    """Constants that happen to match production are not evidence — the settings must come from data."""
+    from vlm_eval import pipeline_config
+
+    cfg = pipeline_config.load(
+        {
+            "processing_config": {
+                "classification_chunk_size": {"value_int": 25},
+                "individual_questions": {"value_json": ["utility_room"]},
+                "image_optimization_enabled": {"value_bool": True},
+                "image_optimization_max_dimension": {"value_int": 1536},
+                "image_optimization_jpeg_quality": {"value_int": 54},
+                "image_optimization_target_size_kb": {"value_int": 600},
+            }
+        }
+    )
+    assert cfg.chunk_size == 25
+    assert cfg.individual_questions == ["utility_room"]
+    assert cfg.jpeg_quality == 54  # not the 85 this tool used to assume
+    assert cfg.target_size_kb == 600
+    assert cfg.faithful and cfg.defaulted == []
+    assert cfg.strict() is cfg
+
+
+def test_pipeline_config_reports_what_it_had_to_guess():
+    from vlm_eval import pipeline_config
+
+    cfg = pipeline_config.load({"processing_config": {"classification_chunk_size": {"value_int": 15}}})
+    assert cfg.chunk_size == 15
+    assert set(cfg.defaulted) == {
+        "individual_questions",
+        "image_optimization_enabled",
+        "image_optimization_max_dimension",
+        "image_optimization_jpeg_quality",
+        "image_optimization_target_size_kb",
+    }
+    assert not cfg.faithful
+    assert "NOT from the export" in cfg.describe()
+    with pytest.raises(SystemExit) as e:
+        cfg.strict()
+    assert "vlm-eval export" in str(e.value)  # tells you how to fix it
+
+
+def test_download_does_not_re_encode_already_processed_images(tmp_path, monkeypatch):
+    """Production uploads images already resized and compressed; re-encoding adds a second generation
+    of loss and hands the models different pixels than the reference model saw."""
+    import httpx
+
+    from vlm_eval import dataset
+
+    original = b"\xff\xd8\xff\xe0 pretend this is a production-optimised jpeg"
+    monkeypatch.setattr(dataset, "IMAGES", tmp_path)
+
+    def handler(request):
+        return httpx.Response(200, content=original)
+
+    real_client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    item = dataset.Item("img", "http://x/a.jpg", "http://x/a.jpg", "indoor")
+    done, failed = dataset.download_all([item])
+    assert (done, failed) == (1, [])
+    assert (tmp_path / "img.jpg").read_bytes() == original  # byte-for-byte, untouched
+
+
+def test_grounding_targets_have_no_domain_baked_in(tmp_path, monkeypatch):
+    from vlm_eval.tasks import grounding
+
+    assert grounding.TARGETS == {}  # nothing about kitchens or radiators lives in the code
+    monkeypatch.setattr("vlm_eval.dataset.DATA", tmp_path)
+    with pytest.raises(SystemExit) as e:
+        grounding.load_targets()
+    assert "grounding_targets.json" in str(e.value)
+
+    (tmp_path / "grounding_targets.json").write_text(json.dumps({"fireplace": "fireplace"}))
+    assert grounding.load_targets() == {"fireplace": "fireplace"}
+
+
+def test_sweep_covers_models_without_a_server(monkeypatch):
+    """Deleting the shell scripts must not lose Florence/InternVL/PaliGemma: `--via` routes to them,
+    and skips the tasks each architecture cannot do."""
+    import argparse
+
+    from vlm_eval import cli
+
+    seen = []
+    monkeypatch.setattr(cli, "cmd_florence", lambda a: seen.append(("florence", a.task, a.limit)))
+    monkeypatch.setattr(cli, "cmd_hf", lambda a: seen.append((a.backend, a.task, a.limit)))
+    monkeypatch.setattr(cli, "cmd_metrics", lambda a: None)
+    monkeypatch.setattr(cli, "cmd_status", lambda a: None)
+
+    def sweep(via, **over):
+        seen.clear()
+        args = dict(
+            model=via,
+            served_name=None,
+            base_url=None,
+            flavor=None,
+            coords=None,
+            tagging=50,
+            captions=20,
+            grounding=10,
+            chunk_all=0,
+            consistency=0,
+            workers=1,
+            no_logprobs=True,
+            via=via,
+            checkpoint=None,
+            device=None,
+        )
+        args.update(over)
+        cli.cmd_sweep(argparse.Namespace(**args))
+        return [(b, t) for b, t, _ in seen]
+
+    # Florence-2 takes one image at a time -> no property summary
+    assert sweep("florence") == [("florence", "captions"), ("florence", "grounding"), ("florence", "tagging")]
+    # PaliGemma is single-image and single-turn -> no summary, no grounding sweep stage
+    assert sweep("paligemma") == [("paligemma", "captions"), ("paligemma", "tagging")]
+    # InternVL is a full chat model -> everything
+    assert sweep("internvl") == [
+        ("internvl", "summary"),
+        ("internvl", "grounding"),
+        ("internvl", "captions"),
+        ("internvl", "tagging"),
+    ]
+    # a stage set to 0 is skipped here too
+    assert sweep("florence", captions=0) == [("florence", "grounding"), ("florence", "tagging")]

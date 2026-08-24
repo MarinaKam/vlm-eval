@@ -19,7 +19,9 @@ from .tasks import captions, grounding, summary, tagging
 class RunConfig:
     model: str
     chunk_size: int = 15
-    individual: list[str] = field(default_factory=lambda: ["utility_room"])
+    # Which tags production asks on their own. Comes from the export; a tag slug from someone's
+    # database has no business being a default in this code.
+    individual: list[str] = field(default_factory=list)
     repeats: int = 1
     workers: int = 1
     logprobs: bool = True
@@ -94,13 +96,19 @@ def run_tagging_one(backend: Backend, item: Item, tags: list[dict], cfg: RunConf
     }
 
 
-def run_captions_one(backend: Backend, item: Item, prompts: dict[str, str], cfg: RunConfig) -> dict[str, Any]:
+def run_captions_one(
+    backend: Backend,
+    item: Item,
+    prompts: dict[str, str],
+    cfg: RunConfig,
+    templates: dict[str, str] | None = None,
+) -> dict[str, Any]:
     img = item.path.read_bytes()
     t0 = time.perf_counter()
     try:
         r = backend.chat(
             [img],
-            captions.prompt_text(prompts),
+            captions.prompt_text(prompts, templates),
             json_schema=captions.schema(prompts),
             max_tokens=captions.MAX_TOKENS,
             temperature=captions.TEMPERATURE,
