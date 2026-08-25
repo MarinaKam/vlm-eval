@@ -179,9 +179,15 @@ if not missing("head to head", _h2h):
     common = {r["image_id"] for r in q3rows} & {r["image_id"] for r in rows}
     a = score([r for r in q3rows if r["image_id"] in common])
     b = score([r for r in rows if r["image_id"] in common])
-    check("shared images", 280, len(common), 0)
-    check("recall Qwen3 %", 82.8, round(100 * a[0] / (a[0] + a[2]), 1))
-    check("recall Qwen2.5 %", 74.8, round(100 * b[0] / (b[0] + b[2]), 1))
+    check("shared images", 500, len(common), 0)
+    check("recall Qwen3 %", 88.6, round(100 * a[0] / (a[0] + a[2]), 1))
+    check("recall Qwen2.5 %", 73.0, round(100 * b[0] / (b[0] + b[2]), 1))
+    check("precision Qwen3 %", 82.4, round(100 * a[0] / (a[0] + a[1]), 1))
+    check("precision Qwen2.5 %", 89.2, round(100 * b[0] / (b[0] + b[1]), 1))
+    check("tags Qwen3 found (TP)", 1249, a[0], 0)
+    check("tags Qwen3 missed (FN)", 161, a[2], 0)
+    check("tags Qwen2.5 found (TP)", 1029, b[0], 0)
+    check("tags Qwen2.5 missed (FN)", 381, b[2], 0)
 
 print("\n=== 7. Adjudicated disagreements ===")
 if missing("adjudication", DATA / "manual_labels.json"):
