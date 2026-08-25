@@ -47,6 +47,7 @@ this order regardless:
 | `review` | a run | HTML page → your verdicts → sharper metrics |
 | `report` | `metrics.json` + `reports/cards/<model>.json` | `reports/<model>.md` |
 | `compare` | `metrics.json` for each model | `reports/comparison.md` |
+| `pdf` | any rendered report | `reports/pdf/*.pdf` — for attaching where Markdown is not read |
 | `volume` | database access | images/month, busiest hour → into `economics.json` |
 | `cost` | `manifest.csv` + your app's cost command | $/image → into `economics.json` |
 | `economics` | **`volume` and `cost` done first** | `reports/economics.md` |
