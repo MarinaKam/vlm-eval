@@ -305,6 +305,12 @@ def render_comparison(cards: list[dict], ms: list[dict]) -> str:
         "Model",
         "Params",
         "Licence",
+        # Every rate below is only as good as these two. A 2-image run whose answers were 77% unparsed
+        # produced "93.3% agreement, 100% recall" and sat in this table beside a 500-image run as if the
+        # two were comparable. The sample size and the share the parser could not read travel with the
+        # percentages so nobody has to open the run files to find out.
+        "Images",
+        "Unparsed %",
         "Tag agreement %",
         "FPR %",
         "Recall %",
@@ -328,6 +334,8 @@ def render_comparison(cards: list[dict], ms: list[dict]) -> str:
                 card.get("name"),
                 card.get("params"),
                 card.get("licence"),
+                _v(tag.get("agreement", {}).get("n_images")),
+                _v(over.get("unparsed_rate")),
                 _v(over.get("accuracy")),
                 _v(over.get("fpr")),
                 _v(over.get("recall")),
