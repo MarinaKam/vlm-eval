@@ -25,7 +25,7 @@ from django.utils import timezone
 # fails with an error instead of touching the database. Safe to point at production.
 with connection.cursor() as _cur:
     _cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
-print("сессия переведена в режим только для чтения")
+print("session set to read only")
 
 MONTHS_BACK = 12
 since = timezone.now() - timedelta(days=30 * MONTHS_BACK)
@@ -72,9 +72,9 @@ if months:
         r_sum = sum(per_month[m].get("completed", 0) for m in recent)
         print(f"average over last {len(recent)} months:        {r_sum / len(recent):,.0f}")
 
-# --- насколько нагрузка неравномерна -------------------------------------------------------------
-# Для схемы «поднимаем GPU под нагрузку» важен не средний объём, а пики: сколько изображений
-# приходит в самый загруженный час и какая доля часов вообще пустая.
+# --- how uneven the load is -------------------------------------------------------------
+# For a scale-up-on-demand GPU the average volume is the wrong number: what decides the machine
+# count is the busiest hour, and what decides the bill is the share of hours with no work at all.
 from django.db.models.functions import TruncDay, TruncHour  # noqa: E402
 
 days = (
@@ -100,11 +100,11 @@ hour_rows = (
 busy_hours = len(hour_rows)
 span_hours = MONTHS_BACK * 30 * 24
 
-print("\nсамые загруженные дни:")
+print("\nbusiest days:")
 for r in days:
-    print(f"  {r['d'].date()}  {r['n']:,} изображений")
-print("\nсамые загруженные часы:")
+    print(f"  {r['d'].date()}  {r['n']:,} images")
+print("\nbusiest hours:")
 for r in hours:
-    print(f"  {r['h']:%Y-%m-%d %H:00}  {r['n']:,} изображений")
-print(f"\nчасов с хотя бы одной задачей: {busy_hours:,} из ~{span_hours:,} ({100 * busy_hours / span_hours:.1f}%)")
-print("(чем ниже эта доля, тем выгоднее поднимать GPU только под нагрузку)")
+    print(f"  {r['h']:%Y-%m-%d %H:00}  {r['n']:,} images")
+print(f"\nhours with at least one job: {busy_hours:,} of ~{span_hours:,} ({100 * busy_hours / span_hours:.1f}%)")
+print("(the lower that share, the more a scale-to-zero GPU beats one that is always on)")

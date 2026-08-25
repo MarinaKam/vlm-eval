@@ -1117,7 +1117,7 @@ def test_truncation_is_read_from_a_field_not_from_the_wording_of_an_error():
     reworded = {
         "image_id": "a",
         "completion": {"calls": 3, "truncated": 1, "status": "truncated"},
-        "errors": ["ран out of room"],
+        "errors": ["ran out of room"],
     }
     finished = {"image_id": "b", "completion": {"calls": 3, "truncated": 0, "status": "ok"}, "errors": []}
     t = metrics.truncation([reworded, finished])
