@@ -441,6 +441,79 @@ Model presets live in `models.json`; measured economics inputs in `data/economic
 
 ---
 
+## Bring your own dataset
+
+Nothing in `vlm_eval/` knows about any particular database. The harness reads six files from `data/`,
+and `vlm-eval export` is only one way to produce them — a template written against one Django schema,
+kept honest as a template rather than pretending to be generic. Write these six yourself and every
+command works the same.
+
+**`data/manifest.csv`** — which images exist. One row per image; `image_id` is the filename stem under
+`data/images/`, `image_type` selects which question set the image gets.
+
+```csv
+image_id,url,s3_url,image_type,user_id,job_created_at
+a1f043fd,https://example/photo.jpg,https://example/photo.jpg,indoor,,2026-08-13T06:46:22+00:00
+```
+
+**`data/tags.json`** — the questions, exactly as your pipeline asks them. `category` decides which
+images get the question (`common` plus one of `indoor`/`outdoor`); `order` decides batch composition.
+
+```json
+[{"slug": "tennis_court", "name": "Tennis Court",
+  "question_text": "Does this image contain a tennis court?",
+  "category": "common", "order": 0, "is_active": true}]
+```
+
+**`data/prompts.json`** — caption and summary prompts, plus the settings your pipeline runs with. The
+harness refuses to guess these: `classification_chunk_size` and `individual_questions` decide how
+questions are batched, and the image settings decide what the model actually sees.
+
+```json
+{"caption_prompts": {"base_caption": "Describe this room in one sentence."},
+ "prompt_templates": {"caption_header": "...", "multi_image_summary": "..."},
+ "processing_config": {"classification_chunk_size": {"value_int": 15},
+                       "individual_questions": {"value_json": ["utility_room"]},
+                       "image_optimization_enabled": {"value_bool": true},
+                       "image_optimization_max_dimension": {"value_int": 1536},
+                       "image_optimization_jpeg_quality": {"value_int": 54},
+                       "image_optimization_target_size_kb": {"value_int": 600}}}
+```
+
+**`data/reference_tags.jsonl`** — what you are comparing against: one line per image. `tags` maps a slug
+to the reference's confidence (presence is what matters, the value is carried through). **`evaluable_slugs`
+is the important field**: the slugs the reference actually judged on this image. Scoring a candidate on a
+question the reference never answered manufactures false positives, so anything outside this list is
+counted as not-comparable rather than wrong.
+
+```json
+{"image_id": "a1f043fd", "image_type": "indoor",
+ "tags": {"kitchen": 0.87, "floorboards": 0.83},
+ "evaluable_slugs": ["kitchen", "floorboards", "pool"]}
+```
+
+**`data/reference_captions.jsonl`** — the reference's free text, keyed by the same prompt names as
+`caption_prompts`.
+
+```json
+{"image_id": "a1f043fd", "captions": {"base_caption": "A bright kitchen with wooden floors."}}
+```
+
+**`data/properties.jsonl`** — image groups for multi-image summaries. Only `property_job_id` and
+`image_ids` are required; `property_summary` is the reference answer if you have one.
+
+```json
+{"property_job_id": "p1", "image_ids": ["a1f043fd", "b2e154ae"],
+ "property_summary": "A three-bedroom terraced house..."}
+```
+
+Then put the images in `data/images/<image_id>.jpg` (or run `vlm-eval download`, which fetches `s3_url`
+from the manifest and encodes them to the settings above), and `vlm-eval status` will tell you what is
+still missing.
+
+`reference_*.jsonl` may also be named `gemini_*.jsonl` — the older names are still read, and the
+rename is deferred rather than done because it would break existing run files (`docs/BACKLOG.md`).
+
 ## The settings come from your export, never from this code
 
 The claim is "your questions, your batches, your pixels". That only holds if the numbers are read
@@ -537,7 +610,7 @@ this table says plainly which is which. Verify a row yourself before trusting a 
 | **Florence-2** via transformers | run end to end (captions, grounding, tagging) | — |
 | Metrics, review, reports, economics | run on real data; every published figure re-derived independently | `python scripts/verify_published_figures.py` |
 | Provenance gate + completion records | run end to end: a full sweep (765 images, 5 tasks) wrote verified sidecars and caught a wrong model variant | start any run twice, second must say `already done`; change `extra_output_tokens`, it must refuse |
-| Dataset export | run against one Django schema only | on another schema it is a template — see "Bring your own dataset" |
+| Dataset export | run against one Django schema only | on another schema it is a template — write the six files yourself, see [Bring your own dataset](#bring-your-own-dataset) |
 | **vLLM** server | **not run** — mocked in tests only | needs an NVIDIA GPU; see below |
 | **InternVL** via transformers | **not run** — routing tested, backend not executed | `vlm-eval hf internvl captions --limit 2` (~17 GB download on first run) |
 | **PaliGemma** via transformers | **not run** — same | accept the Gemma licence, `export HF_TOKEN=…`, then `vlm-eval hf paligemma captions --limit 2` (~6 GB) |
