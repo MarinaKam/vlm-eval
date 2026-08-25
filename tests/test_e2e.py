@@ -1460,3 +1460,21 @@ def test_comparison_includes_models_ruled_out_without_running_them(workspace, mo
     with pytest.raises(SystemExit) as e:
         cli.cmd_compare(argparse.Namespace(models=["nothing-at-all"]))
     assert "neither a run nor a card" in str(e.value)
+
+
+def test_a_report_from_older_metrics_says_so_instead_of_printing_dashes():
+    """The fallback for metrics written before per-task completion tracking rendered its missing values
+    as "— images (—) in tagging", which reads as a number somebody forgot to fill in rather than as an
+    absence of data."""
+    from vlm_eval import report
+
+    line = report._completion_line({}, {})
+    assert "not recorded" in line
+    assert "— images" not in line  # the dash that used to stand in for a count
+
+    # A figure that does exist is still reported.
+    assert "3 images" in report._completion_line({}, {"images_affected": 3, "pct": 30.0})
+
+    # And the per-task block wins whenever it is present.
+    line = report._completion_line({"completion": {"captions": {"images_affected": 28, "pct": 28.0}}}, {})
+    assert "captions 28" in line

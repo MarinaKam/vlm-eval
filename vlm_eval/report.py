@@ -89,9 +89,13 @@ def _completion_line(m: dict, tagging_trunc: dict) -> str:
     """
     per_task = m.get("completion") or {}
     if not per_task:
+        # Metrics written before completion was recorded per task. Say so — the fallback used to render
+        # its missing values as "— images (—)", which reads as a number nobody bothered to fill in.
+        if tagging_trunc.get("images_affected") is None:
+            return "not recorded — these metrics predate per-task completion tracking"
         return (
-            f"{_v(tagging_trunc.get('images_affected'))} images ({_v(tagging_trunc.get('pct'), '%')}) "
-            "in tagging — recorded as unknown, not parsed"
+            f"{tagging_trunc['images_affected']} images ({_v(tagging_trunc.get('pct'), '%')}) in tagging "
+            "— recorded as unknown, not parsed"
         )
     parts = [
         f"{task} {t.get('images_affected', 0)} ({_v(t.get('pct'), '%')})"
@@ -250,6 +254,10 @@ def render_model(card: dict, m: dict, *, options: list | None = None) -> str:
             _reference_note(m),
             "",
             _table(["tag", "n", "TP", "FP", "FN", "TN", "precision %", "recall %", "FPR %"], rows),
+            "",
+            "A dash is not a missing measurement: precision is undefined where the model claimed the "
+            "tag nowhere, and recall where the reference has it nowhere in this sample. `n` is how many "
+            "images the tag was comparable on.",
             "",
         ]
     return "\n".join(parts)
