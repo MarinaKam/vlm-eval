@@ -1,13 +1,12 @@
 {
-  "_comment": "Model presets so commands stay short: `vlm-eval run qwen3 tagging`. `run_name` is the folder under runs/ and the name used in reports; the rest says how to reach the model. `via` may be server (default, any OpenAI-compatible API) or florence/internvl/paligemma (transformers, add `checkpoint`). Your own models go in models.local.json \u2014 same format, gitignored, and it wins over this file. VLM_EVAL_MODELS points at a third file if you keep presets elsewhere.",
+  "_comment": "Model presets so commands stay short: `vlm-eval run qwen3 tagging`. `run_name` is the folder under runs/ and the name used in reports; the rest says how to reach the model. `via` may be server (default, any OpenAI-compatible API) or florence/internvl/paligemma (transformers, add `checkpoint`). Your own models go in models.local.json — same format, gitignored, and it wins over this file. VLM_EVAL_MODELS points at a third file if you keep presets elsewhere.",
   "qwen3": {
-    "run_name": "qwen3-vl-8b-ollama",
-    "served_name": "qwen3-vl:8b",
+    "run_name": "qwen3-vl-8b-instruct-ollama",
+    "served_name": "qwen3-vl:8b-instruct",
     "flavor": "ollama",
     "base_url": "http://localhost:11434/v1",
     "coords": "norm1000",
-    "extra_output_tokens": 3000,
-    "_why": "Qwen3-VL reasons before answering, and how much depends on how much input there is: a single image fits production's budget, an 11-image summary does not. Measured: with the stock budget four of five summaries came back empty."
+    "_why": "The bare `qwen3-vl:8b` tag resolves to the Thinking variant (its Modelfile sets RENDERER/PARSER qwen3-vl-thinking), which reasons before every answer and cannot be told not to — `think:false` is ignored because thinking is the renderer. For a boolean-VQA pipeline that is the wrong variant; name the instruct tag explicitly."
   },
   "qwen2.5": {
     "run_name": "qwen2.5vl-7b-ollama",
@@ -15,5 +14,14 @@
     "flavor": "ollama",
     "base_url": "http://localhost:11434/v1",
     "coords": "abs"
+  },
+  "qwen3-thinking": {
+    "run_name": "qwen3-vl-8b-ollama",
+    "served_name": "qwen3-vl:8b",
+    "flavor": "ollama",
+    "base_url": "http://localhost:11434/v1",
+    "coords": "norm1000",
+    "extra_output_tokens": 3000,
+    "_why": "The reasoning variant, kept as its own preset because it is a different model: measured at 52 images/hour against 269 for Qwen2.5, with 65% of free-text captions returning nothing but reasoning."
   }
 }
