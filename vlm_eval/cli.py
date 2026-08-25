@@ -1072,6 +1072,31 @@ def cmd_report(a) -> None:
     print(f"wrote {out}")
 
 
+def cmd_pdf(a) -> None:
+    """Render the reports as PDFs, for attaching somewhere that does not read Markdown."""
+    from . import topdf
+
+    browser = topdf.find_browser()
+    if not browser:
+        preconditions.fail(
+            "No Chrome, Chromium or Edge found, and the PDF rendering goes through headless Chrome.",
+            "install one, or attach the Markdown files from reports/ as they are",
+        )
+    names = a.reports or [p.stem for p in sorted(REPORTS.glob("*.md"))]
+    out_dir = REPORTS / "pdf"
+    made = []
+    for name in names:
+        src = REPORTS / f"{name.removesuffix('.md')}.md"
+        if not src.exists():
+            print(f"NOTE: no {src.name} — skipped", flush=True)
+            continue
+        made.append(topdf.convert(src, out_dir, browser))
+        print(f"wrote {made[-1]}", flush=True)
+    if not made:
+        preconditions.fail("Nothing was rendered.", "vlm-eval report <model>     (reports/ is empty)")
+    print(f"\n{len(made)} PDF(s) in {out_dir}")
+
+
 def cmd_compare(a) -> None:
     """Compare models side by side, including ones that were assessed without being run.
 
@@ -1205,6 +1230,10 @@ def main(argv=None) -> None:
     s = sub.add_parser("compare", help="render the comparison table")
     s.add_argument("models", nargs="+")
     s.set_defaults(fn=cmd_compare)
+
+    s = sub.add_parser("pdf", help="render reports as PDFs (all of them, or the ones you name)")
+    s.add_argument("reports", nargs="*", help="report names without .md; default: every report")
+    s.set_defaults(fn=cmd_pdf)
 
     s = sub.add_parser("status", help="what is measured so far and what is missing")
     s.set_defaults(fn=cmd_status)

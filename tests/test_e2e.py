@@ -1478,3 +1478,47 @@ def test_a_report_from_older_metrics_says_so_instead_of_printing_dashes():
     # And the per-task block wins whenever it is present.
     line = report._completion_line({"completion": {"captions": {"images_affected": 28, "pct": 28.0}}}, {})
     assert "captions 28" in line
+
+
+def test_markdown_to_html_keeps_tables_intact():
+    """The reports are mostly tables, so a converter that drops or garbles one is useless. This is a
+    deliberately small subset of Markdown; the test pins the parts the reports actually use."""
+    from vlm_eval.topdf import to_html
+
+    md = """# Title
+
+Some **bold** and `code` and a [link](http://x).
+
+| model | recall % |
+|---|---|
+| Qwen3 | 88.6 |
+| Qwen2.5 | 73.0 |
+
+- first
+- second
+
+> a caveat
+"""
+    out = to_html(md, "t")
+    assert out.count("<tr>") == 3 and out.count("<td>") == 4  # header row plus two body rows
+    assert "<th>model</th>" in out and "<td>88.6</td>" in out
+    assert "<h1>Title</h1>" in out
+    assert "<strong>bold</strong>" in out and "<code>code</code>" in out
+    assert '<a href="http://x">link</a>' in out
+    assert out.count("<li>") == 2 and "<blockquote>" in out
+
+
+def test_a_table_row_with_missing_cells_is_padded_not_dropped():
+    """A row shorter than its header is how a hand-written table usually breaks. Losing the row would
+    lose a model from the comparison silently."""
+    from vlm_eval.topdf import to_html
+
+    out = to_html("| a | b | c |\n|---|---|---|\n| 1 | 2 |\n", "t")
+    assert out.count("<td>") == 3 and "<td>1</td>" in out
+
+
+def test_html_escaping_survives_inline_markup():
+    from vlm_eval.topdf import to_html
+
+    out = to_html("A **<script>** tag", "t")
+    assert "<script>" not in out and "&lt;script&gt;" in out
