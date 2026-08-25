@@ -174,8 +174,8 @@ def render_model(card: dict, m: dict, *, options: list | None = None) -> str:
             + f", p95 {_v(tag.get('latency', {}).get('p95_s'), ' s')}",
         ],
         ["Tagging agreement with the reference", _v(over.get("accuracy"), "%")],
-        ["Tagging false-positive rate", _v(over.get("fpr"), "%")],
-        ["Tagging recall", _v(over.get("recall"), "%")],
+        ["Tagging false-positive rate (claimed a tag the reference did not)", _v(over.get("fpr"), "%")],
+        ["Tagging recall (found the tags the reference has)", _v(over.get("recall"), "%")],
         ["Unparsed answers", _v(over.get("unparsed_rate"), "%")],
         [
             "Consistency (3 repeats): identical / mean Jaccard",
@@ -246,11 +246,50 @@ def render_model(card: dict, m: dict, *, options: list | None = None) -> str:
             for s, c in tag["agreement"]["per_tag"].items()
         ]
         parts += [
-            "## Per-tag agreement with Gemini (repeat 0)",
+            "## Per-tag agreement with the reference (repeat 0)",
+            _reference_note(m),
+            "",
             _table(["tag", "n", "TP", "FP", "FN", "TN", "precision %", "recall %", "FPR %"], rows),
             "",
         ]
     return "\n".join(parts)
+
+
+def _reference_note(m: dict) -> str:
+    """What every agreement figure in this report does and does not mean.
+
+    The single most quotable mistake this report could invite is reading "agreement" as "accuracy".
+    They differ whenever the reference is wrong, and on the disputed cases we adjudicated by hand the
+    reference was wrong about as often as the model — so the note carries the adjudication numbers
+    when they exist, and says plainly that they are missing when they do not.
+    """
+    lines = [
+        "Every number here is **agreement with the current pipeline's answers**, not accuracy against",
+        "the truth. One image-and-tag pair is one yes/no question. **TP** the reference says yes and so",
+        "does the model; **FP** the model claims a tag the reference does not have — it invented a",
+        "feature; **FN** the reference has the tag and the model missed it; **TN** both say no.",
+        "**Recall** is the share of the reference's tags the model found; **precision** is the share of",
+        "the model's claims the reference confirms.",
+        "",
+        "A disagreement therefore does not say who is wrong.",
+    ]
+    manual = (m.get("tagging") or {}).get("manual") or {}
+    n = manual.get("n") or manual.get("verdicts")
+    if n:
+        model_right = manual.get("model_correct_pct")
+        ref_right = manual.get("gemini_correct_pct")
+        lines.append(
+            f"On the {n} disputed pairs a human adjudicated, the model was right "
+            f"{_v(model_right, '%')} of the time and the reference {_v(ref_right, '%')} — they fail in "
+            "opposite directions rather than one being better, so recall below 100% is partly the "
+            "model missing real features and partly the reference tagging things that are not there."
+        )
+    else:
+        lines.append(
+            "No disagreements have been adjudicated by hand for this model, so how much of the gap is "
+            "the model's error and how much is the reference's is **unmeasured**."
+        )
+    return "\n".join(lines)
 
 
 def render_comparison(cards: list[dict], ms: list[dict]) -> str:
