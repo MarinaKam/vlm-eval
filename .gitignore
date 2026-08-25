@@ -19,3 +19,4 @@ decisions_*.json
 
 # Your own model presets — never tracked, never lost to a pull
 models.local.json
+.truncation_watch

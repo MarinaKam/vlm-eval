@@ -180,9 +180,17 @@ def latency_stats(values: list[float]) -> dict[str, Any]:
 
 
 def caption_stats(rows: list[dict]) -> dict[str, Any]:
+    """Quality over the answers that finished; failure counted over every image asked.
+
+    A truncated row carries `None` for every caption, so counting it as "empty" reports one failure
+    twice — once as emptiness, once as truncation — and reads as double the real rate. Emptiness is
+    measured among completed answers only (a model that finished and still said nothing), while the
+    denominator for the run stays every image, never shrinking to the ones that worked.
+    """
     per_key: dict[str, list[int]] = defaultdict(list)
     empty = total = 0
-    for r in rows:
+    finished = [r for r in rows if not was_truncated(r)]
+    for r in finished:
         for k, v in (r.get("captions") or {}).items():
             total += 1
             if not v:
@@ -191,8 +199,12 @@ def caption_stats(rows: list[dict]) -> dict[str, Any]:
                 per_key[k].append(len(v.split()))
     return {
         "n_images": len(rows),
-        "empty_pct": _pct(empty, total),
+        "completed": len(finished),
+        "completion_pct": _pct(len(finished), len(rows)),
+        # Among answers the model actually finished — not a share of the whole run.
+        "empty_pct_of_completed": _pct(empty, total),
         "mean_words": {k: round(statistics.mean(v), 1) for k, v in per_key.items() if v},
+        "mean_words_note": f"over the {len(finished)} completed answer(s) of {len(rows)} images asked",
         "truncation": truncation(rows),
         "errors": sum(1 for r in rows if r.get("errors")),
     }
