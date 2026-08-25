@@ -47,6 +47,7 @@ class InternVLBackend:
             .to(self.device)
             .eval()
         )
+        self.checkpoint = checkpoint  # recorded in the run fingerprint; a name is not a version
         self.name = checkpoint.split("/")[-1].lower()
 
     def chat(
@@ -99,6 +100,7 @@ class PaliGemmaBackend:
             .to(self.device)
             .eval()
         )
+        self.checkpoint = checkpoint  # recorded in the run fingerprint; a name is not a version
         self.name = checkpoint.split("/")[-1].lower()
 
     def chat(
