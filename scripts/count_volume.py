@@ -108,3 +108,47 @@ for r in hours:
     print(f"  {r['h']:%Y-%m-%d %H:00}  {r['n']:,} images")
 print(f"\nhours with at least one job: {busy_hours:,} of ~{span_hours:,} ({100 * busy_hours / span_hours:.1f}%)")
 print("(the lower that share, the more a scale-to-zero GPU beats one that is always on)")
+
+# --- the shape of one upload ----------------------------------------------------------------------
+# Monthly and hourly totals say how much work arrives; they do not say how it arrives. A client who
+# uploads one listing of 40 photographs and a client who uploads 40 listings of one are the same point
+# on the hourly chart and completely different problems for a queue. What a person waiting on a result
+# experiences is the size of their own upload, not the monthly average — so measure that distribution
+# and let the report answer "what if someone sends 500 at once" with a number instead of a shrug.
+print("\n=== the shape of one upload ===")
+
+sizes = sorted(
+    PropertyProcessingJob.objects.filter(created_at__gte=since)
+    .annotate(n=Count("images"))
+    .filter(n__gt=0)
+    .values_list("n", flat=True)
+)
+if sizes:
+
+    def pct(p: float) -> int:
+        return sizes[min(len(sizes) - 1, int(p * len(sizes)))]
+
+    print(f"listings measured: {len(sizes):,}   images in them: {sum(sizes):,}")
+    print(f"  images per listing   median {pct(0.5)}   p90 {pct(0.9)}   p99 {pct(0.99)}   max {max(sizes)}")
+    buckets = Counter()
+    for n in sizes:
+        buckets["1" if n == 1 else "2-9" if n < 10 else "10-24" if n < 25 else "25-49" if n < 50 else "50+"] += 1
+    print("  distribution:")
+    for label in ("1", "2-9", "10-24", "25-49", "50+"):
+        n = buckets.get(label, 0)
+        print(f"    {label:>6} images  {n:6,} listings ({100 * n / len(sizes):5.1f}%)")
+else:
+    print("  no listings in the window — nothing to measure")
+
+# How many uploads land in the same hour: one 500-image listing needs a fast worker, five hundred
+# 1-image listings arriving together need a deep queue. They size differently.
+per_hour = (
+    PropertyProcessingJob.objects.filter(created_at__gte=since)
+    .annotate(h=TruncHour("created_at"))
+    .values("h")
+    .annotate(n=Count("id"))
+    .order_by("-n")[:5]
+)
+print("\n  busiest hours by number of uploads (not images):")
+for r in per_hour:
+    print(f"    {r['h']:%Y-%m-%d %H:00}  {r['n']:,} listings")
