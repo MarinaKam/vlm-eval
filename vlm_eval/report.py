@@ -161,6 +161,7 @@ def render_model(card: dict, m: dict, *, options: list | None = None) -> str:
     comp_text = ", ".join(f"{k} {v}" for k, v in (comp.get("by_type") or {}).items()) or "—"
     perf_rows = [
         ["Sample the tagging numbers describe", f"{comp.get('n_images', '—')} images ({comp_text})"],
+        ["How it was served", card.get("serving_caveat") or card.get("measured_on", "—")],
         ["Answers the model never finished", _completion_line(m, trunc)],
         ["Provenance of the run files", _provenance_line(m)],
         ["GPU", _v(card.get("gpu"))],

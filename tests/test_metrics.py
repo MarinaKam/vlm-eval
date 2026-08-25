@@ -52,7 +52,24 @@ def test_latency_stats():
 def test_caption_stats():
     rows = [{"image_id": 1, "captions": {"base_caption": "a b c", "detailed_caption": None}, "errors": []}]
     s = metrics.caption_stats(rows)
-    assert s["empty_pct"] == 50.0 and s["mean_words"] == {"base_caption": 3.0}
+    # A finished answer that left one caption blank really is 50% empty.
+    assert s["empty_pct_of_completed"] == 50.0 and s["mean_words"] == {"base_caption": 3.0}
+    assert s["n_images"] == 1 and s["completed"] == 1
+
+
+def test_a_truncated_caption_is_not_also_counted_as_an_empty_one():
+    """Its captions are None, so counting it as "empty" reports one failure twice — once as emptiness,
+    once as truncation — and reads as double the real rate. Quality is measured over the answers that
+    finished; the denominator stays every image asked."""
+    rows = [
+        {"image_id": 1, "captions": {"base_caption": "a b c"}, "errors": [], "completion": {"truncated": 0}},
+        {"image_id": 2, "captions": {"base_caption": None}, "errors": ["cut"], "completion": {"truncated": 1}},
+    ]
+    s = metrics.caption_stats(rows)
+    assert s["n_images"] == 2 and s["completed"] == 1 and s["completion_pct"] == 50.0
+    assert s["empty_pct_of_completed"] == 0.0  # the one that finished said something
+    assert s["truncation"]["images_affected"] == 1 and s["truncation"]["pct"] == 50.0
+    assert s["mean_words"] == {"base_caption": 3.0}  # the loop contributes no words
 
 
 def test_grounding_stats_scores_only_comparable_images():
