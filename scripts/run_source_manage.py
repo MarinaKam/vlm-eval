@@ -53,7 +53,7 @@ for k, v in _read_env(env_path).items():
     os.environ.setdefault(k, v)
 if db_from:
     os.environ["DATABASE_URL"] = _read_env(db_from)["DATABASE_URL"]
-    print(f"DATABASE_URL взят из {db_from.name}, остальное окружение локальное", flush=True)
+    print(f"DATABASE_URL taken from {db_from.name}; the rest of the environment stays local", flush=True)
 
 
 # The command runs with cwd=SOURCE, so a relative path typed here would resolve there instead.
