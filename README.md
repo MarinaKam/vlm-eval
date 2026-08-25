@@ -536,7 +536,7 @@ this table says plainly which is which. Verify a row yourself before trusting a 
 | OpenAI-compatible server via **Ollama** | run end to end, all four tasks | — |
 | **Florence-2** via transformers | run end to end (captions, grounding, tagging) | — |
 | Metrics, review, reports, economics | run on real data; every published figure re-derived independently | `python scripts/verify_published_figures.py` |
-| Provenance gate + completion records | unit/e2e tested; **no full sweep has run through them yet** | start any run twice, second must say `already done`; change `extra_output_tokens`, it must refuse |
+| Provenance gate + completion records | run end to end: a full sweep (765 images, 5 tasks) wrote verified sidecars and caught a wrong model variant | start any run twice, second must say `already done`; change `extra_output_tokens`, it must refuse |
 | Dataset export | run against one Django schema only | on another schema it is a template — see "Bring your own dataset" |
 | **vLLM** server | **not run** — mocked in tests only | needs an NVIDIA GPU; see below |
 | **InternVL** via transformers | **not run** — routing tested, backend not executed | `vlm-eval hf internvl captions --limit 2` (~17 GB download on first run) |
@@ -579,6 +579,16 @@ empty the numbers are still valid, but per-tag confidence is not available and t
   the timing part on a cloud GPU. Quality numbers do not change.
 - Ollama does not expose logprobs, and cannot enforce a response schema — a small share of malformed
   JSON there is a property of the serving stack, not of the model.
+- **A model tag is not a model.** Ollama's short tags can resolve to a variant you did not intend:
+  `qwen3-vl:8b` is the *Thinking* checkpoint, whose Modelfile has no `$.Think` branch, so `think:false`
+  is silently ignored and reasoning cannot be turned off. Measured on that build, 65% of free-text
+  captions returned nothing but reasoning and it ran 4x slower than the instruct build for worse
+  tagging. Name the variant explicitly; the fingerprint records the weights digest so the mistake
+  cannot survive unnoticed into a second run, but only naming it right avoids the first one.
+- **Free-text generation is where 4-bit builds break.** Structured tasks in the same sweep truncated
+  zero times across 500 tagging images, 60 all-in-one-call images and 300 grounding calls, while 28% of
+  free-text captions fell into a synonym repetition loop and generated until the token cap. A bigger
+  budget cannot end an unbounded loop. Whether sampling defaults contribute is untested.
 - Consistency at `temperature=0` is guaranteed by greedy decoding, so a perfect score proves
   reproducibility, not robustness. The informative version of that test is perturbation (different crop,
   rotation, compression), which this harness does not yet do.

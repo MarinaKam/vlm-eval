@@ -302,7 +302,7 @@ def render_comparison(cards: list[dict], ms: list[dict]) -> str:
         "Recall %",
         "Identical (3x) %",
         "Latency/img s",
-        "Img/h",
+        "Img/h (serial)",
         "$/1K img",
         "Verdict",
     ]
@@ -310,7 +310,11 @@ def render_comparison(cards: list[dict], ms: list[dict]) -> str:
     for card, m in zip(cards, ms):
         tag = m.get("tagging", {})
         over = tag.get("agreement", {}).get("overall", {})
-        iph = m.get("perf", {}).get("images_per_hour_measured") or tag.get("latency", {}).get("images_per_hour_serial")
+        # Serial throughput for every row, even where a concurrent measurement exists. Mixing the two
+        # put 429 images/hour (measured at concurrency 2) beside 145 (derived serially) and read as a
+        # 3x difference between models that are 1.85x apart. The concurrent figure belongs in the
+        # per-model report, where it can say what concurrency produced it.
+        iph = tag.get("latency", {}).get("images_per_hour_serial")
         rows.append(
             [
                 card.get("name"),
