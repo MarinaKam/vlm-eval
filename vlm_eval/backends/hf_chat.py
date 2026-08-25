@@ -7,8 +7,14 @@ Two flavors:
                         ("answer en <q>", "caption en", "detect <obj>"), gated repo (accept Gemma terms,
                         HF_TOKEN required). Tagging = one "answer en" call per question, yes/no parsed.
 
-Both expose chat(images, prompt, ...) -> Response like the OpenAI backend, so runner.py works unchanged
-(json_schema is accepted but ignored — parsing stays lenient).
+Both expose chat(images, prompt, ...) -> Response like the OpenAI backend, so runner.py works unchanged.
+
+**json_schema is accepted and ignored here, and that is a real limitation, not a detail.** transformers
+has no guided decoding, so a response schema is a request the model may decline. Measured: InternVL3.5
+answered tag questions as a prose bullet list (`- tennis_court: No`) with renamed slugs, and 77% of its
+answers could not be parsed — the model was answering correctly, in the wrong shape. Under vLLM the same
+schema is enforced by the decoder. Read a low agreement figure from this backend as a question about the
+serving path before reading it as a question about the model.
 """
 
 import io

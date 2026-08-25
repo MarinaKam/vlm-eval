@@ -650,8 +650,12 @@ empty the numbers are still valid, but per-tag confidence is not available and t
 
 - Latency measured on a laptop is not production latency; `docs/INFRA.md` has a recipe for re-running
   the timing part on a cloud GPU. Quality numbers do not change.
-- Ollama does not expose logprobs, and cannot enforce a response schema — a small share of malformed
-  JSON there is a property of the serving stack, not of the model.
+- Ollama does not expose logprobs, so per-tag confidence is unavailable there; vLLM does, and the
+  harness reads it, but that path has not been run against a live server. Ollama *does* enforce a
+  response schema (>= 0.5 honours `response_format`), and the runs bear it out: zero unparsed answers
+  across 30,912 and 15,136 tag decisions. An earlier version of this file blamed the serving stack for
+  a small share of malformed JSON; that was wrong — the unparsed answers in question turned out to be
+  truncation, and the wrong explanation survived here longer than in the report it came from.
 - **A model tag is not a model.** Ollama's short tags can resolve to a variant you did not intend:
   `qwen3-vl:8b` is the *Thinking* checkpoint, whose Modelfile has no `$.Think` branch, so `think:false`
   is silently ignored and reasoning cannot be turned off. Measured on that build, 65% of free-text
