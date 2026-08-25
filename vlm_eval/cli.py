@@ -1073,12 +1073,32 @@ def cmd_report(a) -> None:
 
 
 def cmd_compare(a) -> None:
+    """Compare models side by side, including ones that were assessed without being run.
+
+    A model can be ruled out by its architecture — Florence-2 has no boolean VQA and no multi-image
+    input, and no amount of running it changes that. Demanding metrics for every row would keep exactly
+    those models out of the table that the comparison exists to rule out, so a model with a card and no
+    run appears with dashes and its verdict intact.
+    """
     a.models = [_presets().get(m, {}).get("run_name", m) for m in a.models]
+    cards, ms = [], []
     for model in a.models:
-        path = preconditions.need_metrics(runner.RUNS, model)
-        preconditions.warn_if_stale(path, sorted((runner.RUNS / model).glob("*.jsonl")), f"vlm-eval metrics {model}")
-    cards = [_card(m) for m in a.models]
-    ms = [json.loads((runner.RUNS / m / "metrics.json").read_text()) for m in a.models]
+        card = _card(model)
+        path = runner.RUNS / model / "metrics.json"
+        if path.exists():
+            preconditions.warn_if_stale(
+                path, sorted((runner.RUNS / model).glob("*.jsonl")), f"vlm-eval metrics {model}"
+            )
+            ms.append(json.loads(path.read_text()))
+        elif (REPORTS / "cards" / f"{model}.json").exists():
+            print(f"NOTE: {model} has no run — showing its card only (assessed, not measured)", flush=True)
+            ms.append({})
+        else:
+            preconditions.fail(
+                f"'{model}' has neither a run nor a card, so there is nothing to compare.",
+                f"vlm-eval sweep {model}     (or write reports/cards/{model}.json for a desk assessment)",
+            )
+        cards.append(card)
     out = REPORTS / "comparison.md"
     out.write_text(report.render_comparison(cards, ms))
     print(f"wrote {out}")

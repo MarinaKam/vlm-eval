@@ -1434,3 +1434,29 @@ def test_sweep_hands_the_token_budget_to_every_stage(workspace, monkeypatch):
         )
     )
     assert seen and all(extra == 3000 for _, extra in seen), seen
+
+
+def test_comparison_includes_models_ruled_out_without_running_them(workspace, monkeypatch, capsys):
+    """Florence-2 has no boolean VQA and no multi-image input — architecture, not a measurement gap.
+    Demanding metrics.json for every row kept exactly the models the comparison exists to rule out."""
+    import argparse
+
+    import vlm_eval.cli as cli
+
+    reports = workspace["reports"]
+    (reports / "cards").mkdir(parents=True)
+    (reports / "cards" / "desk-only.json").write_text(
+        json.dumps({"model": "desk-only", "name": "Desk Only", "params": "0.77B", "verdict": "Not recommended"})
+    )
+    monkeypatch.setattr(cli, "REPORTS", reports)
+    monkeypatch.setattr(cli.report, "REPORTS", reports, raising=False)
+    monkeypatch.setattr(cli, "_presets", lambda: {})
+
+    cli.cmd_compare(argparse.Namespace(models=["desk-only"]))
+    text = (reports / "comparison.md").read_text()
+    assert "Desk Only" in text and "Not recommended" in text and "0.77B" in text
+    assert "assessed, not measured" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as e:
+        cli.cmd_compare(argparse.Namespace(models=["nothing-at-all"]))
+    assert "neither a run nor a card" in str(e.value)
