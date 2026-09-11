@@ -1523,3 +1523,30 @@ def test_html_escaping_survives_inline_markup():
 
     out = to_html("A **<script>** tag", "t")
     assert "<script>" not in out and "&lt;script&gt;" in out
+
+
+def test_the_heavy_dependencies_are_never_imported_at_module_level():
+    """The base install has no torch, and everything except running a model must work without it.
+
+    Scoring cached embeddings, fitting thresholds and rendering reports are array work and nothing more,
+    so they belong to anyone who installs the package plainly. This is a seam that breaks quietly: one
+    module-level `import torch` moves the whole encoder path behind an 800 MB extra, and the only symptom
+    is a fresh environment failing to import. CI installs without the extra, so this test is what notices.
+    """
+    import ast
+    from pathlib import Path
+
+    import vlm_eval
+
+    heavy = {"torch", "torchvision", "transformers", "safetensors", "timm", "accelerate"}
+    offenders = []
+    for path in sorted(Path(vlm_eval.__file__).parent.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        for node in tree.body:  # module level only — a lazy import inside a function is the point
+            names = []
+            if isinstance(node, ast.Import):
+                names = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = [node.module]
+            offenders.extend(f"{path.name}: {n}" for n in names if n.split(".")[0] in heavy)
+    assert not offenders, f"imported at module level, which the base install cannot satisfy: {offenders}"

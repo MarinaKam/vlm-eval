@@ -72,13 +72,20 @@ stamps the warning into the file.
 ## 0. Setup (once)
 
 ```bash
-uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
+uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" to run models locally
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
 source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
 .venv/bin/pytest                                       # 60 tests including end-to-end
 ```
 
 `.env` holds everything machine-specific. It is gitignored, as are `data/`, `runs/` and `reports/`.
+
+**What the extra is and is not for.** The base install runs everything that talks to a server, and the
+whole second half of the encoder path besides: scoring cached embeddings, fitting thresholds, the
+vocabulary-growth arithmetic, the reports. `".[hf]"` adds torch and transformers, and is needed only to
+*execute a model in this process* — `embed`, `florence`, `hf`, and the probe's solver. The split is
+enforced by a test: nothing in the package may import torch or transformers at module level, so a plain
+install cannot be broken by an import added in passing.
 
 ---
 
@@ -281,7 +288,7 @@ SigLIP 2, CLIP — cannot be asked anything: it places the image and each tag de
 you compare them. That is a different instrument with a different failure surface, and the same dataset
 measures both.
 
-Install the extra this path needs, then run it in order:
+`embed` runs a model in this process, so it needs the heavy extra; everything after it does not.
 
 ```bash
 uv pip install -e ".[dev,hf]"                            # torch, transformers and their tokenizers
