@@ -245,4 +245,111 @@ shared = set(t15) & set(t47)
 check("tags at batches of 15", 226, sum(len(t15[k]) for k in shared), 0)
 check("tags at 47 in one call", 204, sum(len(t47[k]) for k in shared), 0)
 
+
+print("\n=== 11. Encoder investigation ===")
+
+ENCODERS = {
+    "siglip2-base-patch16-224": {"mean_ap": 0.682, "precision": 45.1, "recall": 70.9, "fpr": 8.3},
+    "siglip2-so400m-patch14-384": {"mean_ap": 0.705, "precision": 53.0, "recall": 72.3, "fpr": 6.2},
+    "clip-vit-large-patch14": {"mean_ap": 0.582, "precision": 40.3, "recall": 66.0, "fpr": 9.4},
+    "clip-vit-h-14-laion2b": {"mean_ap": 0.636, "precision": 43.4, "recall": 67.5, "fpr": 8.5},
+}
+FLOOR = 30
+
+
+def distinct_photographs():
+    """One image_id per distinct file. Hashed here rather than asked of the package, like everything else.
+
+    The sampled manifest holds the same photograph under several ids. Counting each upload separately
+    weights a picture by how often it was uploaded, and lets a threshold be fitted on an image identical
+    to one it is then scored against.
+    """
+    import hashlib
+
+    first = {}
+    with open(DATA / "manifest.csv") as fh:
+        for row in sorted(csv.DictReader(fh), key=lambda r: r["image_id"]):
+            path = DATA / "images" / f"{row['image_id']}.jpg"
+            if path.exists():
+                first.setdefault(hashlib.sha256(path.read_bytes()).hexdigest(), row["image_id"])
+    return set(first.values())
+
+
+KEEP = distinct_photographs()
+check("distinct photographs in a 1,000-row manifest", 869, len(KEEP), 0)
+
+
+def average_precision_independent(pairs):
+    """Area under the precision-recall curve, ties credited as a group. Written from the definition.
+
+    Deliberately not the package's implementation: average precision is the figure the whole encoder
+    comparison is ranked by, so it is the one worth computing twice from different code.
+    """
+    ordered = sorted(pairs, key=lambda p: -p[0])
+    total_pos = sum(1 for _, y in ordered if y)
+    if not total_pos:
+        return None
+    total = seen = hits = 0.0
+    i = 0
+    while i < len(ordered):
+        j = i
+        while j < len(ordered) and ordered[j][0] == ordered[i][0]:
+            j += 1
+        group = ordered[i:j]
+        seen += len(group)
+        hits += sum(1 for _, y in group if y)
+        total += sum(1 for _, y in group if y) * (hits / seen)
+        i = j
+    return total / total_pos
+
+
+for model, claimed in ENCODERS.items():
+    scores_file = RUNS / model / "tagging_embed_ensemble.jsonl"
+    if missing(f"{model} scores", scores_file):
+        continue
+    by_slug = defaultdict(list)
+    for row in jsonl(scores_file):
+        if row["image_id"] not in KEEP:
+            continue
+        positives = set((ref.get(row["image_id"]) or {}).get("tags") or {})
+        for slug, value in (row.get("scores") or {}).items():
+            by_slug[slug].append((value, slug in positives))
+
+    solid = {s: v for s, v in by_slug.items() if sum(1 for _, y in v if y) >= FLOOR}
+    aps = [average_precision_independent(v) for v in solid.values()]
+    check(f"{model}: tags with >={FLOOR} positives", 20, len(solid), 0)
+    check(f"{model}: mean average precision", claimed["mean_ap"], round(sum(aps) / len(aps), 3), 0.001)
+
+    cv = RUNS / model / "tagging_embed_ensemble_per_tag_threshold_cv.jsonl"
+    if missing(f"{model} calibrated answers", cv):
+        continue
+    tp, fp, fn, tn, null = score([r for r in jsonl(cv) if r["image_id"] in KEEP])
+    check(f"{model}: decisions", 27136, tp + fp + fn + tn + null, 0)
+    check(f"{model}: precision %", claimed["precision"], round(100 * tp / (tp + fp), 1), 0.1)
+    check(f"{model}: recall %", claimed["recall"], round(100 * tp / (tp + fn), 1), 0.1)
+    check(f"{model}: false positive %", claimed["fpr"], round(100 * fp / (fp + tn), 1), 0.1)
+
+_base = RUNS / "siglip2-base-patch16-224" / "scale.json"
+if not missing("vocabulary growth", _base):
+    scale = json.loads(_base.read_text())
+    # Read back rather than re-derived: reproducing it would mean re-encoding ten thousand prompts.
+    # Bit-identity is deliberately not the claim — it held on one machine and not on another, because the
+    # BLAS kernel's blocking depends on the matrix width. What travels is that the drift stays far below
+    # anything a threshold sits on.
+    check(
+        "no score drifts far enough to change a decision, at any vocabulary size",
+        0,
+        sum(row["independent_rule_scores_beyond_margin"] for row in scale["sizes"]),
+        0,
+    )
+    largest = scale["sizes"][-1]
+    check("largest vocabulary measured", 10000, largest["vocabulary"], 0)
+    check("softmax decisions flipped at 10,000 tags", 15110, largest["softmax_rule_decisions_flipped"], 1)
+
+_kept = [r for image_id, r in ref.items() if image_id in KEEP]
+_positives = sum(len(set(r.get("tags") or {}) & set(r.get("evaluable_slugs") or [])) for r in _kept)
+_judged = sum(len(r.get("evaluable_slugs") or []) for r in _kept)
+check("base rate %", 7.24, round(100 * _positives / _judged, 2), 0.01)
+check("trivial always-absent accuracy %", 92.8, round(100 * (_judged - _positives) / _judged, 1), 0.1)
+
 print(f"\n{'=' * 70}\n{ok} matched, {fail} mismatched, {skipped} skipped for missing data")

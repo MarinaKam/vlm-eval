@@ -51,6 +51,20 @@ def model_presets() -> list[Path]:
     return [f for f in files if f.exists()]
 
 
+def encoder_presets() -> list[Path]:
+    """Image-text encoder presets, same layering as `model_presets`.
+
+    A separate file because an encoder is reached differently from a served model: there is no endpoint
+    and no flavor, only a checkpoint to load in-process. Mixing the two in `models.json` would put fields
+    in it that mean nothing for most of its entries.
+    """
+    files = [ROOT / "encoders.json", ROOT / "encoders.local.json"]
+    override = os.environ.get("VLM_EVAL_ENCODERS")
+    if override:
+        files.append(Path(os.path.expanduser(override)))
+    return [f for f in files if f.exists()]
+
+
 def source_repo() -> Path:
     """Path to the source Django app (for the export scripts). Required, no default."""
     val = os.environ.get("VLM_EVAL_SOURCE_REPO")

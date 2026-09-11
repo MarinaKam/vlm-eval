@@ -56,10 +56,10 @@ implies more testing than happened is worse than one that admits the gap.
 After writing or regenerating a report, re-derive it:
 
 ```bash
-python scripts/verify_published_figures.py
+vlm-eval verify
 ```
 
-It recomputes every published number from `runs/` and `data/` importing nothing from this package. A
+It runs `scripts/verify_published_figures.py` in its own process, recomputing every published number from `runs/` and `data/` while importing nothing from this package. A
 MISMATCH means the report is wrong or the data moved on — it has already caught the latter once.
 
 ## Never commit
@@ -91,7 +91,10 @@ because "47" read as a number of photos.
 This is an evaluation tool; a wrong number is worse than no number.
 
 - **Every code path that writes run rows goes through `provenance.check()`.** No exceptions for "small"
-  backends — a test walks the CLI's syntax tree and fails on any `run_over_items` call without a check.
+  backends — a test walks the CLI's syntax tree and fails on any row-writing call without a check. A
+  command that replaces a file in full passes `rewritten=True`: the gate exists to stop two
+  configurations being *mixed* in one file, and a full rewrite cannot mix, so there the change is
+  recorded rather than refused.
 - **The fingerprint's composition is frozen while runs are in flight.** Adding a field changes every
   digest and refuses every resume, so batch such changes between sweeps, never during one.
 - **Truncation and failure are read from the `completion` record**, never by matching error-message

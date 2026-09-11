@@ -35,7 +35,12 @@ this order regardless:
      │                        └─► review ────┘                   │
      │                                       └─► compare ────────┤
      ├─► volume ─┐                                               │
-     └─► cost ───┴─► (fill data/economics.json) ─► economics ────┘
+     ├─► cost ───┴─► (fill data/economics.json) ─► economics ────┤
+     │                                                           │
+     └─► prototypes ─► embed ─► similarity ─► calibrate ─┬─► embedding-report ─┘
+                                                         ├─► scale
+                                                         ├─► probe
+                                                         └─► hybrid
 ```
 
 | command | needs | produces |
@@ -47,6 +52,13 @@ this order regardless:
 | `review` | a run | HTML page → your verdicts → sharper metrics |
 | `report` | `metrics.json` + `reports/cards/<model>.json` | `reports/<model>.md` |
 | `compare` | `metrics.json` for each model | `reports/comparison.md` |
+| `embed` | images + an encoder checkpoint | `runs/<model>/embeddings.jsonl` — one vector per image |
+| `similarity` | embeddings + tag prompts | `runs/<model>/tagging_embed_<strategy>.jsonl` |
+| `calibrate` | a similarity run | thresholds fitted out of fold, plus the answers they give |
+| `scale` | embeddings + an encoder | `runs/<model>/scale.json` — cost and stability as the vocabulary grows |
+| `probe` | embeddings + a similarity run | `runs/<model>/probe.json` — a linear probe on frozen vectors |
+| `hybrid` | a calibrated run | `runs/<model>/hybrid.json` — what deferring the borderline cases costs |
+| `embedding-report` | the files above | `reports/embedding-*.md` |
 | `pdf` | any rendered report | `reports/pdf/*.pdf` — for attaching where Markdown is not read |
 | `volume` | database access | images/month, busiest hour → into `economics.json` |
 | `cost` | `manifest.csv` + your app's cost command | $/image → into `economics.json` |
@@ -60,13 +72,20 @@ stamps the warning into the file.
 ## 0. Setup (once)
 
 ```bash
-uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" for transformers-based models
+uv venv --python 3.14 && uv pip install -e ".[dev]"   # add ".[hf]" to run models locally
 cp .env.example .env                                   # edit: point VLM_EVAL_SOURCE_REPO at your app
 source .venv/bin/activate                              # so `vlm-eval` works without the path prefix
 .venv/bin/pytest                                       # 60 tests including end-to-end
 ```
 
 `.env` holds everything machine-specific. It is gitignored, as are `data/`, `runs/` and `reports/`.
+
+**What the extra is and is not for.** The base install runs everything that talks to a server, and the
+whole second half of the encoder path besides: scoring cached embeddings, fitting thresholds, the
+vocabulary-growth arithmetic, the reports. `".[hf]"` adds torch and transformers, and is needed only to
+*execute a model in this process* — `embed`, `florence`, `hf`, and the probe's solver. The split is
+enforced by a test: nothing in the package may import torch or transformers at module level, so a plain
+install cannot be broken by an import added in passing.
 
 ---
 
@@ -240,7 +259,9 @@ file. The one backend caveat: a plain vLLM/OpenAI endpoint reports a model name 
 so fresh runs work fully there while automatic resume of a non-empty file is refused.
 
 Change any of it and the next run stops and names what changed; archive the file or pick another run
-name. Every backend goes through the same gate — a served model, Florence-2, PaliGemma, a throughput
+name. The exception is a file the command *replaces* rather than extends — rescoring cached
+vectors writes every row afresh, so there is nothing for two configurations to mix in, and the change is
+recorded and named instead of refused. Every backend goes through the same gate — a served model, Florence-2, PaliGemma, a throughput
 run — and a test walks the CLI's syntax tree to prove no path writes rows around it.
 
 A file that existed before any of this was recorded is a third case, and stamping it with today's
@@ -261,6 +282,68 @@ wording of an error message, and report the share affected per task, so a run th
 it looks says so itself.
 
 ---
+
+## Part 2b — Encoders, not only generators
+
+A generative model is asked sixty questions and answers sixty booleans. An **image-text encoder** —
+SigLIP 2, CLIP — cannot be asked anything: it places the image and each tag description in one space and
+you compare them. That is a different instrument with a different failure surface, and the same dataset
+measures both.
+
+`embed` runs a model in this process, so it needs the heavy extra; everything after it does not.
+
+```bash
+uv pip install -e ".[dev,hf]"                            # torch, transformers and their tokenizers
+```
+
+```bash
+vlm-eval prototypes                                      # draft the tag prompts, then edit them
+vlm-eval embed siglip2-base                              # encode every image once
+vlm-eval similarity siglip2-base --strategy ensemble     # score the tags against it
+vlm-eval calibrate siglip2-base --strategy ensemble      # thresholds fitted out of fold
+vlm-eval scale siglip2-base                              # 15 -> 10,000 tags: what actually grows
+vlm-eval probe siglip2-base                              # is the signal there even if no sentence reaches it
+vlm-eval hybrid siglip2-base                             # encoder first, a VLM only for the borderline cases
+vlm-eval embedding-report                                # -> reports/embedding-*.md
+```
+
+Checkpoints live in `encoders.json`, the same way served models live in `models.json`; your own go in
+`encoders.local.json`, which is gitignored. The `smoke` preset points at a small checkpoint under its own
+run name, so `vlm-eval embed smoke --limit 20` and the commands after it check the whole chain in seconds
+without touching a real measurement's files. The text window, the embedding width and the trained decision
+boundary are read **from the checkpoint**, never listed in the preset.
+
+### What is different about scoring an encoder
+
+**A similarity is not an answer.** Somewhere a threshold turns `0.2413` into a tag, and if you fit that
+threshold on the same decisions you report on, the number is inflated. `calibrate` fits thresholds under
+k-fold cross-validation **by image**, so no reported decision was judged by a rule that had seen it, and a
+tag with too few positives to fit its own threshold falls back to the global one instead of getting a
+number it cannot support. Both properties have tests that fail without them.
+
+**Some checkpoints ship their own boundary and some do not.** SigLIP is trained with a sigmoid loss and
+carries `logit_scale` and `logit_bias`, so `sigmoid(scale * cosine + bias)` is a calibrated probability.
+CLIP is trained with a softmax over a batch: its scores are meaningful only relative to the other
+candidates, so `similarity` records every answer as unknown and says why, rather than inventing a cut.
+
+**Your tag definitions may not fit.** CLIP reads 77 tokens and SigLIP 2 reads 64. A definition written for
+a model that follows instructions is usually longer than that, and the part that overflows is the end —
+which is where the exclusions live. Worse, a text encoder has no mechanism for negation: embedding "do not
+count pools in paintings" moves the vector *toward* paintings. Every command prints which definitions were
+cut, and the count travels into the run file, because a low score for a truncated definition measures the
+prompt and not the model.
+
+**Six ways to turn a tag into prompts** (`vlm-eval similarity --strategy`): the production question
+verbatim, the tag name as a caption, several paraphrases averaged into one prototype, several kept apart
+and aggregated by best or by mean, and positives scored against negatives. `vlm-eval prototypes`
+drafts the prompt file from your tag names; the entries it generates are marked `reviewed_by: generator`
+until a person edits them, and the harness prints that breakdown rather than calling them reviewed.
+
+**Growing the vocabulary is a question about the decision rule, not about N.** Thresholding each tag on
+its own has no term that refers to any other tag, so a thousand extra tags cannot move an existing tag's
+score — `scale` asserts that rather than assuming it. Normalising across the vocabulary, the classic
+zero-shot softmax, makes every score a function of all the others, and `scale` counts how many decisions
+that flips.
 
 ## Part 3 — Turn runs into an answer
 
@@ -432,8 +515,9 @@ cost accuracy there. Measure it on the model you actually use.
 | `run_source_manage.py` | ✅ fully | runs a management command in your app with its environment loaded; `--db-from` points at another deployment's database while keeping local library paths |
 | `make_cost_urls.py` | ✅ fully | builds the URL list for token-cost measurement |
 | `smoke_manifest.py` | ✅ fully | minimal dataset from a folder of JPEGs |
-| `verify_published_figures.py` | ⚠️ project-specific | re-derives every number in `reports/` from the raw run files, using none of this package's code |
+| `verify_published_figures.py` | ⚠️ project-specific | behind `vlm-eval verify`: re-derives every number in `reports/` from the raw run files, using none of this package's code |
 | `run_export.py` | ✅ wrapper | loads the app's `.env` without shell quoting problems and runs the export |
+| `build_prototypes.py` | ✅ fully | behind `vlm-eval prototypes`: drafts caption-shaped prompts from your tag names |
 | `export_staging_dataset.py` | ⚠️ template | written against one Django schema — adapt to yours |
 | `count_volume.py` | ⚠️ template | same: adapt the model and field names |
 | `extract_tags_from_migrations.py` | ⚠️ template | fallback source for tag questions |
@@ -579,7 +663,7 @@ which ones were not run and why — "a 17 GB download" is a reason, "should work
 And when a report has been written, re-derive it:
 
 ```bash
-python scripts/verify_published_figures.py
+vlm-eval verify
 ```
 
 It recomputes every published number straight from `runs/` and `data/` with an independent
@@ -609,8 +693,10 @@ this table says plainly which is which. Verify a row yourself before trusting a 
 |---|---|---|
 | OpenAI-compatible server via **Ollama** | run end to end, all four tasks | — |
 | **Florence-2** via transformers | run end to end (captions, grounding, tagging) | — |
-| Metrics, review, reports, economics | run on real data; every published figure re-derived independently | `python scripts/verify_published_figures.py` |
+| Metrics, review, reports, economics | run on real data; every published figure re-derived independently | `vlm-eval verify` |
 | Provenance gate + completion records | run end to end: a full sweep (765 images, 5 tasks) wrote verified sidecars and caught a wrong model variant | start any run twice, second must say `already done`; change `extra_output_tokens`, it must refuse |
+| **SigLIP 2** and **CLIP** encoders via transformers | run end to end on 1,000 images: 4 checkpoints x 6 strategies, calibrated | re-run `embed` then `similarity`; the second `embed` must say `already done` |
+| Threshold calibration, probe, vocabulary growth | run on real scores; the fast threshold sweep is tested against an exhaustive scan | `.venv/bin/pytest tests/test_calibration.py` |
 | Dataset export | run against one Django schema only | on another schema it is a template — write the six files yourself, see [Bring your own dataset](#bring-your-own-dataset) |
 | **vLLM** server | **not run** — mocked in tests only | needs an NVIDIA GPU; see below |
 | **InternVL** via transformers | **not run** — routing tested, backend not executed | `vlm-eval hf internvl captions --limit 2` (~17 GB download on first run) |
