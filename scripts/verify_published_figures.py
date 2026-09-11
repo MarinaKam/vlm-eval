@@ -245,4 +245,82 @@ shared = set(t15) & set(t47)
 check("tags at batches of 15", 226, sum(len(t15[k]) for k in shared), 0)
 check("tags at 47 in one call", 204, sum(len(t47[k]) for k in shared), 0)
 
+
+print("\n=== 11. Encoder investigation ===")
+
+ENCODERS = {
+    "siglip2-base-patch16-224": {"mean_ap": 0.703, "precision": 47.1, "recall": 73.7, "fpr": 8.2},
+    "siglip2-so400m-patch14-384": {"mean_ap": 0.722, "precision": 54.2, "recall": 73.5, "fpr": 6.1},
+    "clip-vit-large-patch14": {"mean_ap": 0.595, "precision": 41.6, "recall": 67.7, "fpr": 9.4},
+    "clip-vit-h-14-laion2b": {"mean_ap": 0.643, "precision": 43.9, "recall": 70.6, "fpr": 8.9},
+}
+FLOOR = 30
+
+
+def average_precision_independent(pairs):
+    """Area under the precision-recall curve, ties credited as a group. Written from the definition.
+
+    Deliberately not the package's implementation: average precision is the figure the whole encoder
+    comparison is ranked by, so it is the one worth computing twice from different code.
+    """
+    ordered = sorted(pairs, key=lambda p: -p[0])
+    total_pos = sum(1 for _, y in ordered if y)
+    if not total_pos:
+        return None
+    total = seen = hits = 0.0
+    i = 0
+    while i < len(ordered):
+        j = i
+        while j < len(ordered) and ordered[j][0] == ordered[i][0]:
+            j += 1
+        group = ordered[i:j]
+        seen += len(group)
+        hits += sum(1 for _, y in group if y)
+        total += sum(1 for _, y in group if y) * (hits / seen)
+        i = j
+    return total / total_pos
+
+
+for model, claimed in ENCODERS.items():
+    scores_file = RUNS / model / "tagging_embed_ensemble.jsonl"
+    if missing(f"{model} scores", scores_file):
+        continue
+    by_slug = defaultdict(list)
+    for row in jsonl(scores_file):
+        positives = set((ref.get(row["image_id"]) or {}).get("tags") or {})
+        for slug, value in (row.get("scores") or {}).items():
+            by_slug[slug].append((value, slug in positives))
+
+    solid = {s: v for s, v in by_slug.items() if sum(1 for _, y in v if y) >= FLOOR}
+    aps = [average_precision_independent(v) for v in solid.values()]
+    check(f"{model}: tags with >={FLOOR} positives", 21, len(solid), 0)
+    check(f"{model}: mean average precision", claimed["mean_ap"], round(sum(aps) / len(aps), 3), 0.001)
+
+    cv = RUNS / model / "tagging_embed_ensemble_per_tag_threshold_cv.jsonl"
+    if missing(f"{model} calibrated answers", cv):
+        continue
+    tp, fp, fn, tn, null = score(jsonl(cv))
+    check(f"{model}: decisions", 30912, tp + fp + fn + tn + null, 0)
+    check(f"{model}: precision %", claimed["precision"], round(100 * tp / (tp + fp), 1), 0.1)
+    check(f"{model}: recall %", claimed["recall"], round(100 * tp / (tp + fn), 1), 0.1)
+    check(f"{model}: false positive %", claimed["fpr"], round(100 * fp / (fp + tn), 1), 0.1)
+
+_base = RUNS / "siglip2-base-patch16-224" / "scale.json"
+if not missing("vocabulary growth", _base):
+    scale = json.loads(_base.read_text())
+    # Read back rather than re-derived: reproducing it would mean re-encoding ten thousand prompts.
+    check(
+        "independent thresholds unchanged at every vocabulary size",
+        True,
+        all(row["independent_rule_scores_identical"] for row in scale["sizes"]),
+    )
+    largest = scale["sizes"][-1]
+    check("largest vocabulary measured", 10000, largest["vocabulary"], 0)
+    check("softmax decisions flipped at 10,000 tags", 15110, largest["softmax_rule_decisions_flipped"], 1)
+
+_positives = sum(len(set(r.get("tags") or {}) & set(r.get("evaluable_slugs") or [])) for r in ref.values())
+_judged = sum(len(r.get("evaluable_slugs") or []) for r in ref.values())
+check("base rate %", 7.35, round(100 * _positives / _judged, 2), 0.01)
+check("trivial always-absent accuracy %", 92.6, round(100 * (_judged - _positives) / _judged, 1), 0.1)
+
 print(f"\n{'=' * 70}\n{ok} matched, {fail} mismatched, {skipped} skipped for missing data")

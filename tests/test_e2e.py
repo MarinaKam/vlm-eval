@@ -1148,7 +1148,8 @@ def test_every_command_that_writes_run_rows_passes_the_provenance_gate():
             for n in ast.walk(fn)
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
         }
-        if "runner.run_over_items" in calls and "provenance.check" not in calls:
+        writes_rows = {"runner.run_over_items", "embedding_run.write_rows"} & calls
+        if writes_rows and "provenance.check" not in calls:
             unguarded.append(fn.name)
     assert not unguarded, f"writes run rows without a provenance check: {unguarded}"
 

@@ -5,11 +5,15 @@
   vlm-eval run qwen3 tagging            run one task (also: captions | grounding | summary)
   vlm-eval sweep qwen3                  run every task for a model, cheapest first
   vlm-eval run qwen3 tagging --chunk 0  every question in one call
+  vlm-eval embed siglip2-base           encode every image once, for an image-text encoder
+  vlm-eval similarity siglip2-base      score the tags against those vectors
+  vlm-eval calibrate siglip2-base       thresholds fitted out of fold, and the answers they give
   vlm-eval metrics qwen3                compute metrics       -> runs/<model>/metrics.json
   vlm-eval review qwen3                 judge the disagreements yourself
   vlm-eval report qwen3                 per-model report      -> reports/<model>.md
   vlm-eval compare qwen3 qwen2.5        comparison table      -> reports/comparison.md
   vlm-eval economics                    self-host vs API      -> reports/economics.md
+  vlm-eval verify                       re-derive every published figure, independently
 
 Measuring the inputs for that last one:
 
@@ -26,11 +30,12 @@ import json
 import platform
 import sys
 import time
+from pathlib import Path
 
-from . import dataset, metrics, pipeline_config, preconditions, provenance, report, review, runner
+from . import calibration, dataset, metrics, pipeline_config, preconditions, provenance, report, review, runner
 from .backends.openai_compat import OpenAICompatBackend
 from .config import REPORTS
-from .tasks import captions, grounding, summary, tagging
+from .tasks import captions, grounding, similarity, summary, tagging
 
 
 def _presets() -> dict:
@@ -69,6 +74,467 @@ def _backend(a) -> OpenAICompatBackend:
     if not be.health():
         sys.exit(f"backend not reachable at {a.base_url} (GET /models failed)")
     return be
+
+
+# A throwaway run name for checking the chain end to end. It is never a row in a deliverable.
+SMOKE_PRESET = "smoke"
+
+
+def _encoder_presets() -> dict:
+    """Every known image-text encoder, later files overriding earlier ones."""
+    from .config import encoder_presets
+
+    merged: dict[str, dict] = {}
+    for f in encoder_presets():
+        merged.update({k: v for k, v in json.loads(f.read_text()).items() if not k.startswith("_")})
+    return merged
+
+
+def _encoder(a):
+    """Load the checkpoint named by preset, or a bare Hugging Face id used as-is."""
+    from .backends.encoder import Encoder
+
+    preset = _encoder_presets().get(a.encoder, {})
+    repo_id = getattr(a, "repo_id", None) or preset.get("repo_id") or a.encoder
+    run_name = preset.get("run_name", a.encoder)
+    enc = Encoder(run_name, repo_id, device=getattr(a, "device", None))
+    boundary = f"{enc.native_threshold:.4f}" if enc.calibrated else "none — needs calibration"
+    print(
+        f"{run_name}: {repo_id} on {enc.device}, {enc.dim}-d, text window {enc.context_length} tokens, "
+        f"own decision boundary at cosine {boundary}"
+    )
+    return enc, run_name
+
+
+def _strategy(name: str):
+    from .tasks.similarity import STRATEGIES
+
+    if name not in STRATEGIES:
+        sys.exit(f"unknown strategy {name!r}; available: {', '.join(STRATEGIES)}")
+    return STRATEGIES[name]
+
+
+def _encoder_fingerprint(task: str, enc, *, items, payload, extra) -> provenance.RunFingerprint:
+    """Same gate as a served model, with the prompts and the decision rule folded in.
+
+    An encoder run has no chunking and no token budget, but it has two things a chat run does not: which
+    sentence stood for each tag, and what turned a similarity into a yes. Either one changes what an
+    answer means, so both belong in the digest.
+    """
+    from . import calibration as _calibration
+    from . import embedding_run as _embedding_run
+    from .backends import encoder as _encoder_mod
+    from .tasks import similarity as _similarity
+
+    return provenance.RunFingerprint(
+        task=task,
+        served_name=enc.repo_id,
+        chunk_size=0,
+        prompt_digest=provenance.digest_of(payload),
+        backend=type(enc).__name__,
+        checkpoint=enc.checkpoint,
+        image_prep=_image_prep(),
+        images_digest=dataset.images_digest(items),
+        route=_route(enc),
+        code=provenance.code_identity([_encoder_mod, _similarity, _embedding_run, _calibration]),
+        model_identity=_model_identity(enc),
+        extra=extra,
+    )
+
+
+def cmd_embed(a) -> None:
+    """Encode every manifest image once. Every strategy and every threshold reuses this file."""
+    from . import embedding_run
+
+    enc, model = _encoder(a)
+    items = dataset.load_manifest()
+    out = embedding_run.embeddings_path(model)
+    fp = _encoder_fingerprint(
+        "embed",
+        enc,
+        items=items,
+        payload={"pooling": "pooler_output", "normalised": "l2"},
+        extra={"dim": enc.dim, "dtype": "float32"},
+    )
+    provenance.check(out, fp)
+    n = runner.run_over_items(
+        items,
+        lambda it: embedding_run.embed_one(enc, it),
+        out,
+        repeats=1,
+        workers=1,
+        limit=a.limit,
+    )
+    rows = dataset.load_jsonl(out)
+    lat = metrics.latency_stats([r["latency_s"] for r in rows if r.get("latency_s")])
+    print(f"{out.name}: {len(rows)} vector(s) cached ({n} new); {lat.get('median_s')}s median per image")
+
+
+def _prototype_set(enc, tags, strategy):
+    """Encode the prompts for one strategy and say how many definitions did not fit."""
+    from . import embedding_run
+    from .tasks import similarity
+
+    prototypes = embedding_run.load_prototypes()
+    if strategy.source == "prototypes" and not prototypes:
+        sys.exit(
+            "strategy needs data/prototypes.json — build a draft with `vlm-eval prototypes`, "
+            "then edit the entries flagged for review."
+        )
+    states = embedding_run.review_state(prototypes)
+    if strategy.source == "prototypes" and states:
+        summary = ", ".join(f"{len(v)} {k}" for k, v in sorted(states.items()))
+        print(f"NOTE: tag prompts by who last touched them: {summary}. Only 'human' counts as reviewed.")
+    ps = similarity.build_prototype_set(enc, tags, prototypes, strategy)
+    fit = similarity.prompt_fit(ps, tags)
+    if fit["n_tags_truncated"]:
+        print(
+            f"NOTE: {fit['n_tags_truncated']} of {len(tags)} tag definition(s) do not fit the "
+            f"{fit['context_length']}-token text window and were cut: {fit['tags_truncated'][:6]}...\n"
+            "      A low score for those measures the prompt, not the model."
+        )
+    return ps, fit
+
+
+def cmd_similarity(a) -> None:
+    """Score the cached vectors against one prompt strategy, at a threshold nobody fitted on this data."""
+    from . import embedding_run
+
+    enc, model = _encoder(a)
+    strategy = _strategy(a.strategy)
+    tags = dataset.load_tags()
+    items = dataset.load_manifest()
+    ps, fit = _prototype_set(enc, tags, strategy)
+
+    native = enc.native_threshold
+    thresholds = dict.fromkeys(ps.slugs, native) if native is not None else None
+    source = f"checkpoint's own boundary (cosine {native:.4f})" if native is not None else "none"
+    if thresholds is None:
+        print(
+            "NOTE: this checkpoint ships no decision boundary — its scores are only meaningful relative\n"
+            "      to other candidates. Answers are recorded as unknown; run `calibrate` for decisions."
+        )
+
+    out = embedding_run.scores_path(model, strategy.name)
+    fp = _encoder_fingerprint(
+        "similarity",
+        enc,
+        items=items,
+        payload={"texts": ps.texts, "positives": ps.positives, "negatives": ps.negatives},
+        extra={
+            "strategy": strategy.name,
+            "decision_rule": a.rule,
+            "threshold_source": source,
+            "n_prompts": len(ps.texts),
+            "tags_truncated": fit["tags_truncated"],
+        },
+    )
+    provenance.check(out, fp)
+    rows = embedding_run.score_rows(
+        model=model,
+        tags=tags,
+        prototype_set=ps,
+        strategy=strategy,
+        thresholds=thresholds,
+        reference=dataset.reference_tags_by_image(),
+        threshold_source=source,
+        rule=a.rule,
+    )
+    n = embedding_run.write_rows(out, rows)
+    scored = sum(len(r["scores"]) for r in rows)
+    print(f"{out.name}: {n} image(s), {scored} comparable decision(s), strategy {strategy.name}, rule {a.rule}")
+
+
+def cmd_calibrate(a) -> None:
+    """Fit thresholds under cross-validation and write the answers they produce."""
+    from . import calibration, embedding_run
+
+    enc, model = _encoder(a)
+    strategy = _strategy(a.strategy)
+    items = dataset.load_manifest()
+    reference = dataset.reference_tags_by_image()
+
+    scored = dataset.load_jsonl(embedding_run.scores_path(model, strategy.name))
+    if not scored:
+        sys.exit(
+            f"no scores for {model}/{strategy.name} — run "
+            f"`vlm-eval similarity {a.encoder} --strategy {strategy.name}` first"
+        )
+
+    decisions = embedding_run.decisions_from_rows(scored, reference)
+    result = calibration.cross_validated(decisions, folds=a.folds, seed=a.seed, min_positives=a.min_positives)
+    path = embedding_run.calibration_path(model, strategy.name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"strategy": strategy.name, **result}, indent=2, default=str))
+
+    for rule_name, key in (("per_tag_threshold", "per_tag_threshold"), ("global_threshold", "global_threshold")):
+        rows = embedding_run.apply_predictions(scored, result["predictions"][key])
+        out = embedding_run.scores_path(model, f"{strategy.name}_{key}", calibrated=True)
+        fp = _encoder_fingerprint(
+            "similarity-calibrated",
+            enc,
+            items=items,
+            payload={"strategy": strategy.name, "threshold_rule": key},
+            extra={
+                "strategy": strategy.name,
+                "threshold_rule": key,
+                "folds": a.folds,
+                "seed": a.seed,
+                "min_positives": a.min_positives,
+            },
+        )
+        provenance.check(out, fp)
+        embedding_run.write_rows(out, rows)
+        print(f"{out.name}: answers from {rule_name} thresholds fitted out of fold")
+
+    fitted = result["whole_set_fit"]
+    print(
+        f"{path.name}: {result['n_decisions']} decision(s) over {result['n_images']} image(s); "
+        f"{fitted['tags_with_own_threshold']} tag(s) cleared the {a.min_positives}-positive floor"
+    )
+    ranked = sorted(((v["average_precision"] or 0.0, s, v) for s, v in result["per_tag"].items()), reverse=True)
+    print(f"\n{'tag':30} {'AP':>7} {'pos':>5} {'overlap':>8}")
+    for ap, slug, v in ranked[:12]:
+        overlap = v["distribution"].get("overlap_pct")
+        print(f"{slug:30} {ap:7.3f} {v['n_positives']:5} {('-' if overlap is None else f'{overlap:.1f}%'):>8}")
+
+
+def _provenance_stamp(enc, strategy) -> dict:
+    """Which weights and which prompts a summary file came from.
+
+    The provenance gate exists to stop two configurations being *appended* into one file. These summaries
+    are rewritten whole, so there is nothing to mix — but a number in a report still has to be traceable
+    to the checkpoint that produced it, and a bare `scale.json` is not.
+    """
+    from . import calibration as _calibration
+    from . import embedding_run as _embedding_run
+    from . import probe as _probe
+    from .tasks import similarity as _similarity
+
+    return {
+        "checkpoint": enc.repo_id,
+        "weights": enc.weights_digest,
+        "device": enc.device,
+        "strategy": strategy.name,
+        "text_window": enc.context_length,
+        "code": provenance.code_identity([_embedding_run, _similarity, _calibration, _probe]),
+    }
+
+
+def cmd_scale(a) -> None:
+    """Section 2: what grows with the vocabulary — the arithmetic, and whether the answers move."""
+    from . import embedding_run
+
+    enc, model = _encoder(a)
+    strategy = _strategy(a.strategy)
+    tags = dataset.load_tags()
+    ps, _fit = _prototype_set(enc, tags, strategy)
+    result = embedding_run.vocabulary_growth(
+        encoder=enc,
+        model=model,
+        tags=tags,
+        prototype_set=ps,
+        strategy=strategy,
+        sizes=a.sizes,
+        word_list=a.word_list,
+    )
+    out = embedding_run.RUNS / model / "scale.json"
+    out.write_text(json.dumps({**_provenance_stamp(enc, strategy), **result}, indent=2))
+    print(f"\n{'vocabulary':>11} {'us/image':>10} {'independent rule':>18} {'softmax flips':>15}")
+    for row in result["sizes"]:
+        same = "identical" if row["independent_rule_scores_identical"] else "CHANGED"
+        print(
+            f"{row['vocabulary']:>11} {row['microseconds_per_image']:>10.2f} {same:>18} "
+            f"{row['softmax_rule_decisions_flipped']:>15}"
+        )
+    print(f"\n{out.name}: {len(result['sizes'])} vocabulary size(s) measured")
+
+
+def cmd_probe(a) -> None:
+    """Section 5: is the signal in the image embedding even where the text side cannot reach it."""
+    from . import embedding_run, probe
+
+    enc, model = _encoder(a)
+    strategy = _strategy(a.strategy)
+    reference = dataset.reference_tags_by_image()
+    scored = dataset.load_jsonl(embedding_run.scores_path(model, strategy.name))
+    if not scored:
+        sys.exit(f"no scores for {model}/{strategy.name} — run `similarity` first")
+
+    ids, _types, vectors = embedding_run.load_vectors(model)
+    result = probe.cross_validated_probe(
+        image_ids=ids,
+        vectors=vectors,
+        decisions=embedding_run.decisions_from_rows(scored, reference),
+        folds=a.folds,
+        seed=a.seed,
+        min_positives=a.min_positives,
+    )
+    out = embedding_run.RUNS / model / "probe.json"
+    out.write_text(json.dumps({**_provenance_stamp(enc, strategy), **result}, indent=2))
+
+    zero_shot = json.loads(embedding_run.calibration_path(model, strategy.name).read_text())["per_tag"]
+    pairs = [
+        (v["average_precision"], zero_shot[slug]["average_precision"], slug, v["n_positives"])
+        for slug, v in result["per_tag"].items()
+        if v["average_precision"] is not None and zero_shot.get(slug, {}).get("average_precision") is not None
+    ]
+    pairs.sort(key=lambda r: -(r[0] - r[1]))
+    print(f"\n{'tag':26} {'probe AP':>9} {'zero-shot':>10} {'gain':>7} {'pos':>5}")
+    for probe_ap, zs_ap, slug, n_pos in pairs[:14]:
+        print(f"{slug:26} {probe_ap:9.3f} {zs_ap:10.3f} {probe_ap - zs_ap:+7.3f} {n_pos:5}")
+    mean_probe = sum(p for p, _, _, _ in pairs) / len(pairs)
+    mean_zs = sum(z for _, z, _, _ in pairs) / len(pairs)
+    print(f"\nmean over the {len(pairs)} fitted tag(s): probe {mean_probe:.3f} vs zero-shot {mean_zs:.3f}")
+    print(f"{out.name}: ceiling is the pipeline itself — the labels came from it")
+
+
+def cmd_hybrid(a) -> None:
+    """The ticket's third option: keep the confident scores, buy a VLM call only for the rest."""
+    from . import embedding_run
+
+    enc, model = _encoder(a)
+    strategy = _strategy(a.strategy)
+    tags = dataset.load_tags()
+    reference = dataset.reference_tags_by_image()
+    pc = pipeline_config.load()
+
+    rule = f"{strategy.name}_{a.threshold_rule}"
+    rows = dataset.load_jsonl(embedding_run.scores_path(model, rule, calibrated=True))
+    if not rows:
+        sys.exit(f"no calibrated answers for {model}/{rule} — run `calibrate` first")
+    fit = json.loads(embedding_run.calibration_path(model, strategy.name).read_text())
+    thresholds = fit["whole_set_fit"]["per_tag"]
+
+    result = embedding_run.hybrid_curve(
+        rows=rows,
+        thresholds=thresholds,
+        reference=reference,
+        calls_today=embedding_run.calls_per_image(tags, rows, pc.chunk_size, list(pc.individual_questions)),
+        chunk_size=pc.chunk_size,
+    )
+    print(
+        f"\n{'defer':>6} {'decisions':>10} {'images':>8} {'calls now':>10} {'calls':>7} {'saved':>7} "
+        f"{'prec':>6} {'recall':>7} {'FPR':>6}"
+    )
+    summary = []
+    for row in result["budgets"]:
+        agg = metrics.tagging_agreement(row.pop("rows"), reference)["overall"]
+        summary.append({**row, "precision": agg["precision"], "recall": agg["recall"], "fpr": agg["fpr"]})
+        print(
+            f"{row['deferral_budget_pct']:5.0f}% {row['decisions_deferred']:10} {row['images_pct']:7.1f}% "
+            f"{row['vlm_calls_today']:10} {row['vlm_calls_hybrid']:7} "
+            f"{str(row['call_reduction_pct']):>6}% {agg['precision']:6} {agg['recall']:7} {agg['fpr']:6}"
+        )
+    out = embedding_run.RUNS / model / "hybrid.json"
+    out.write_text(
+        json.dumps(
+            {
+                "strategy": strategy.name,
+                "threshold_rule": a.threshold_rule,
+                "n_decisions": result["n_decisions"],
+                "budgets": summary,
+            },
+            indent=2,
+        )
+    )
+    print(f"\n{out.name}: no API call was made — deferred answers were read from the reference file")
+
+
+def cmd_embedding_report(a) -> None:
+    """Render the investigation's reports from the run files: one per checkpoint, plus the comparison."""
+    from . import embedding_report
+
+    reference = dataset.reference_tags_by_image()
+    tags = dataset.load_tags()
+    strategies = list(similarity.STRATEGIES)
+    presets = _encoder_presets()
+    chosen = a.encoders or [name for name in presets if name != SMOKE_PRESET]
+    models = [presets.get(name, {}).get("run_name", name) for name in chosen]
+    cards = {}
+    for name in chosen:
+        run_name = presets.get(name, {}).get("run_name", name)
+        card = _card(run_name)
+        card.setdefault("title", run_name)
+        card.setdefault("checkpoint", presets.get(name, {}).get("repo_id", run_name))
+        card.setdefault("licence", presets.get(name, {}).get("licence"))
+        cards[run_name] = card
+
+    REPORTS.mkdir(parents=True, exist_ok=True)
+    written = []
+    for run_name in models:
+        text = embedding_report.render_model(
+            model=run_name,
+            card=cards[run_name],
+            strategies=strategies,
+            best_strategy=a.strategy,
+            reference=reference,
+            tags=tags,
+            floor=a.min_positives,
+        )
+        out = REPORTS / f"embedding-{run_name}.md"
+        out.write_text(text)
+        written.append(out)
+
+    baselines = json.loads(Path(a.baselines).read_text()) if a.baselines else _known_baselines()
+    comparison = REPORTS / "embedding-comparison.md"
+    comparison.write_text(
+        embedding_report.render_comparison(
+            models=models,
+            cards=cards,
+            strategies=strategies,
+            best_strategy=a.strategy,
+            reference=reference,
+            floor=a.min_positives,
+            baselines=baselines,
+        )
+    )
+    written.append(comparison)
+
+    recommendation = REPORTS / "embedding-recommendation.md"
+    recommendation.write_text(
+        embedding_report.render_recommendation(
+            models=models,
+            cards=cards,
+            best_strategy=a.strategy,
+            reference=reference,
+            floor=a.min_positives,
+            baselines=baselines,
+        )
+    )
+    written.append(recommendation)
+    for path in written:
+        print(f"wrote {path}")
+
+
+def _known_baselines() -> list[dict]:
+    """Generative models measured in the earlier investigation, read from their own metrics files.
+
+    Typed into this report by hand once, and that is exactly how a figure drifts — so they are recomputed
+    from the run files that are still on disk, and a model whose file is gone is omitted rather than
+    remembered.
+    """
+    reference = dataset.reference_tags_by_image()
+    known = [
+        ("qwen2.5vl-7b-ollama", "Qwen2.5-VL-7B", "7B"),
+        ("qwen3-vl-8b-instruct-ollama", "Qwen3-VL-8B-Instruct", "8B"),
+    ]
+    out = []
+    for run_name, title, params in known:
+        rows = dataset.load_jsonl(runner.tagging_out(run_name, 15))
+        if not rows:
+            continue
+        agg = metrics.tagging_agreement(rows, reference)["overall"]
+        out.append(
+            {
+                "title": title,
+                "params": params,
+                "precision": agg["precision"],
+                "recall": agg["recall"],
+                "fpr": agg["fpr"],
+            }
+        )
+    return out
 
 
 def cmd_download(a) -> None:
@@ -712,6 +1178,22 @@ def _script(name: str, *args: str) -> int:
     return subprocess.call([sys.executable, str(dataset.ROOT / "scripts" / name), *args])
 
 
+def cmd_verify(a) -> None:
+    """Re-derive every published figure from the raw files, with an implementation of its own.
+
+    Run as a separate process on purpose. The whole value of the check is that it imports nothing from
+    this package — a bug in `metrics.py` must not be able to confirm itself — and calling it in-process
+    would quietly put both on the same side of the comparison.
+    """
+    sys.exit(_script("verify_published_figures.py"))
+
+
+def cmd_prototypes(a) -> None:
+    """Draft the tag prompt file from the tag names, for an encoder run."""
+    args = ["--force"] if a.force else []
+    sys.exit(_script("build_prototypes.py", *args))
+
+
 def cmd_export(a) -> None:
     """Build the dataset from the source application's database (read-only)."""
     sys.exit(_script("run_export.py"))
@@ -1213,6 +1695,91 @@ def main(argv=None) -> None:
     s.add_argument("--limit", type=int, default=None)
     s.set_defaults(fn=cmd_hf)
 
+    s = sub.add_parser("embed", help="encode every image once with an image-text encoder")
+    s.add_argument("encoder", help="preset from encoders.json, or a Hugging Face repo id")
+    s.add_argument("--repo-id", dest="repo_id", default=None, help="override the preset's checkpoint")
+    s.add_argument("--device", default=None, help="mps | cuda | cpu (default: the best available)")
+    s.add_argument("--limit", type=int, default=None)
+    s.set_defaults(fn=cmd_embed)
+
+    s = sub.add_parser("similarity", help="score cached vectors against one prompt strategy")
+    s.add_argument("encoder")
+    s.add_argument("--repo-id", dest="repo_id", default=None)
+    s.add_argument("--device", default=None)
+    s.add_argument("--strategy", default="name", help="how a tag becomes prompts (see tasks/similarity.py)")
+    s.add_argument(
+        "--rule",
+        default="independent",
+        choices=similarity.DECISION_RULES,
+        help="independent: one threshold per tag. softmax: normalise across the whole vocabulary",
+    )
+    s.set_defaults(fn=cmd_similarity)
+
+    s = sub.add_parser("calibrate", help="fit thresholds out of fold and write the answers they give")
+    s.add_argument("encoder")
+    s.add_argument("--repo-id", dest="repo_id", default=None)
+    s.add_argument("--device", default=None)
+    s.add_argument("--strategy", default="name")
+    s.add_argument("--folds", type=int, default=5)
+    s.add_argument("--seed", type=int, default=7104)
+    s.add_argument(
+        "--min-positives",
+        dest="min_positives",
+        type=int,
+        default=calibration.MIN_POSITIVES_FOR_OWN_THRESHOLD,
+        help="positives a tag needs before it gets its own threshold instead of the global one",
+    )
+    s.set_defaults(fn=cmd_calibrate)
+
+    s = sub.add_parser("scale", help="how cost and answers change as the tag vocabulary grows")
+    s.add_argument("encoder")
+    s.add_argument("--repo-id", dest="repo_id", default=None)
+    s.add_argument("--device", default=None)
+    s.add_argument("--strategy", default="ensemble")
+    s.add_argument("--sizes", type=int, nargs="+", default=[15, 50, 100, 500, 1000, 5000, 10000])
+    s.add_argument(
+        "--word-list",
+        dest="word_list",
+        type=Path,
+        default=None,
+        help="newline-separated words to build competing candidates from",
+    )
+    s.set_defaults(fn=cmd_scale)
+
+    s = sub.add_parser("probe", help="logistic regression on the frozen embeddings, cross-validated")
+    s.add_argument("encoder")
+    s.add_argument("--repo-id", dest="repo_id", default=None)
+    s.add_argument("--device", default=None)
+    s.add_argument("--strategy", default="ensemble")
+    s.add_argument("--folds", type=int, default=5)
+    s.add_argument("--seed", type=int, default=7104)
+    s.add_argument(
+        "--min-positives", dest="min_positives", type=int, default=calibration.MIN_POSITIVES_FOR_OWN_THRESHOLD
+    )
+    s.set_defaults(fn=cmd_probe)
+
+    s = sub.add_parser("hybrid", help="embedding decides the confident tags, a VLM is asked the rest")
+    s.add_argument("encoder")
+    s.add_argument("--repo-id", dest="repo_id", default=None)
+    s.add_argument("--device", default=None)
+    s.add_argument("--strategy", default="ensemble")
+    s.add_argument(
+        "--threshold-rule",
+        dest="threshold_rule",
+        default="per_tag_threshold",
+        choices=["per_tag_threshold", "global_threshold"],
+    )
+    s.set_defaults(fn=cmd_hybrid)
+
+    s = sub.add_parser("embedding-report", help="render the encoder reports and their comparison")
+    s.add_argument("encoders", nargs="*", help="presets to include (default: every one in encoders.json)")
+    s.add_argument("--strategy", default="ensemble", help="the strategy the headline tables report")
+    s.add_argument(
+        "--min-positives", dest="min_positives", type=int, default=calibration.MIN_POSITIVES_FOR_OWN_THRESHOLD
+    )
+    s.add_argument("--baselines", default=None, help="JSON file of generative models to show alongside")
+    s.set_defaults(fn=cmd_embedding_report)
+
     s = sub.add_parser("review", help="judge model-vs-reference disagreements by eye")
     s.add_argument("model")
     s.add_argument("--per-tag", type=int, default=5)
@@ -1237,6 +1804,13 @@ def main(argv=None) -> None:
 
     s = sub.add_parser("status", help="what is measured so far and what is missing")
     s.set_defaults(fn=cmd_status)
+
+    s = sub.add_parser("verify", help="re-derive every published figure from the raw files")
+    s.set_defaults(fn=cmd_verify)
+
+    s = sub.add_parser("prototypes", help="draft the tag prompt file an encoder run scores against")
+    s.add_argument("--force", action="store_true", help="overwrite the existing file and lose its edits")
+    s.set_defaults(fn=cmd_prototypes)
 
     s = sub.add_parser("export", help="build the dataset from the source app's database")
     s.set_defaults(fn=cmd_export)

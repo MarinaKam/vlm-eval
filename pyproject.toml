@@ -12,7 +12,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
 # transformers backends (Florence-2, PaliGemma 2) — install on the GPU box (or Mac for smoke)
-hf = ["torch", "torchvision", "transformers>=4.45", "accelerate", "einops", "timm", "numpy<2"]
+hf = ["torch", "torchvision", "transformers>=4.45", "accelerate", "einops", "timm", "numpy<2",
+      "sentencepiece", "protobuf", "safetensors"]
 
 [project.scripts]
 vlm-eval = "vlm_eval.cli:main"

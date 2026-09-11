@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "Image-text encoders, reached in-process rather than over an endpoint. `run_name` is the folder",
+    "under runs/; `repo_id` is the Hugging Face checkpoint. The text window, the embedding width and",
+    "the trained sigmoid boundary are read from the checkpoint itself, never listed here — a constant",
+    "that happens to match today is not evidence. Your own checkpoints go in encoders.local.json,",
+    "which is gitignored and overrides same-named entries here."
+  ],
+  "siglip2-base": {
+    "run_name": "siglip2-base-patch16-224",
+    "repo_id": "google/siglip2-base-patch16-224",
+    "licence": "Apache-2.0"
+  },
+  "siglip2-so400m": {
+    "run_name": "siglip2-so400m-patch14-384",
+    "repo_id": "google/siglip2-so400m-patch14-384",
+    "licence": "Apache-2.0"
+  },
+  "clip-l14": {
+    "run_name": "clip-vit-large-patch14",
+    "repo_id": "openai/clip-vit-large-patch14",
+    "licence": "MIT"
+  },
+  "openclip-h14": {
+    "run_name": "clip-vit-h-14-laion2b",
+    "repo_id": "laion/CLIP-ViT-H-14-laion2B-s32B-b79K",
+    "licence": "MIT"
+  },
+  "smoke": {
+    "run_name": "encoder-smoke",
+    "repo_id": "google/siglip2-base-patch16-224",
+    "licence": "Apache-2.0",
+    "note": "A throwaway run name for checking the whole chain on a handful of images. It writes to its own runs/ folder, so a quick check cannot collide with a real measurement's provenance."
+  }
+}

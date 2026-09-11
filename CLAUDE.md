@@ -56,10 +56,10 @@ implies more testing than happened is worse than one that admits the gap.
 After writing or regenerating a report, re-derive it:
 
 ```bash
-python scripts/verify_published_figures.py
+vlm-eval verify
 ```
 
-It recomputes every published number from `runs/` and `data/` importing nothing from this package. A
+It runs `scripts/verify_published_figures.py` in its own process, recomputing every published number from `runs/` and `data/` while importing nothing from this package. A
 MISMATCH means the report is wrong or the data moved on — it has already caught the latter once.
 
 ## Never commit
