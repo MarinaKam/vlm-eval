@@ -29,6 +29,12 @@ The informative test is the same scene slightly changed: different crop, a few d
 heavier compression. That is where models diverge, and it predicts behaviour on the photos people
 actually upload. The plumbing exists (`--repeats` plus a transform step in `dataset.optimize`).
 
+**Extend the acceptance matrix with look-alikes and small-object cases.** A perturbation set built from
+crop, rotation and compression alone under-tests the failure mode that matters most for an encoder used as
+a cheap first pass: it reads room-level tags far more reliably than fine detail, or anything defined by an
+exclusion. The cases that separate those are a visually similar class and a small object inside a larger
+scene, and neither is a perturbation of the original photograph.
+
 ## Rename the reference-model fields
 
 `gemini_tags.jsonl`, `gemini_captions.jsonl`, the `gemini` argument in `metrics`/`review`, and the

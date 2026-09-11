@@ -29,16 +29,18 @@ BASE_RATE_NOTE = (
 
 def base_rate(reference: dict[str, dict], keep: set[str] | None = None) -> dict[str, float]:
     """How often the reference says a tag is present, over the decisions it actually judged."""
-    positives = total = 0
+    positives = total = images = 0
     for image_id, row in reference.items():
         if keep and image_id not in keep:
             continue
+        images += 1
         judged = row.get("evaluable_slugs") or list(row.get("tags") or {})
         total += len(judged)
         positives += len(set(row.get("tags") or {}) & set(judged))
     return {
         "positives": positives,
         "total": total,
+        "images": images,
         "rate_pct": 100.0 * positives / total if total else 0.0,
         "trivial_accuracy_pct": 100.0 * (total - positives) / total if total else 0.0,
     }
@@ -212,7 +214,7 @@ def hybrid_table(hybrid: dict) -> str:
         ]
         for row in hybrid["budgets"]
     ]
-    return _table(
+    table = _table(
         [
             "Decisions deferred",
             "Images needing a call",
@@ -225,6 +227,18 @@ def hybrid_table(hybrid: dict) -> str:
         ],
         rows,
     )
+    # Printed, not assumed. This curve is produced by its own command, so the population it used is a
+    # fact about that file rather than something the surrounding report can promise on its behalf.
+    images, distinct = hybrid.get("n_images"), hybrid.get("n_distinct_images")
+    if images is None:
+        return table + "\n\nThis curve predates the record of which images it scored."
+    note = f"Over {distinct:,} photographs."
+    if distinct != images:
+        note = (
+            f"**Over {images:,} rows holding {distinct:,} photographs — not the same population as the "
+            "tables above.** Re-run the hybrid command to bring it into line."
+        )
+    return table + "\n\n" + note
 
 
 def render_model(
@@ -256,9 +270,9 @@ def render_model(
         "",
         "## What this measures",
         "",
-        "One vector per image, compared against one vector per tag definition. The reference is the "
-        "answers our current pipeline gave on the same 1,000 images, so agreement means *behaves like "
-        "today*, never *is correct*.",
+        f"One vector per image, compared against one vector per tag definition, over {rate['images']:,} "
+        "photographs. The reference is the answers our current pipeline gave on the same pictures, so "
+        "agreement means *behaves like today*, never *is correct*.",
         "",
         BASE_RATE_NOTE.format(
             pos=rate["positives"],
@@ -395,8 +409,8 @@ def _verdict(best: dict, incumbent: dict) -> tuple[str, str]:
         return (
             "Hybrid",
             f"on its own the encoder fires {ratio:.0f}x as many false positives as the model in production, "
-            "so it cannot replace it — but it is confident on most decisions, and a generative model is "
-            "only needed for the rest",
+            "so it cannot replace it — but it is confident enough on most individual decisions to cut the "
+            "number of calls per image, which is a different thing from calling the model on fewer images",
         )
     return ("Option B — embeddings, with care", "the extra false positives are within tolerance")
 
@@ -435,6 +449,9 @@ def render_recommendation(
     choice, because = _verdict(best, incumbent)
 
     hybrid = _load(RUNS / best["model"] / "hybrid.json")
+    # The call column is counted over whatever the hybrid actually scored, which is a fact recorded in
+    # that file. Naming a round number in the header was wrong by 131 photographs and invisible.
+    scored = (hybrid or {}).get("n_distinct_images")
     probe = _load(RUNS / best["model"] / "probe.json")
     cal = _load(RUNS / best["model"] / f"calibration_{best_strategy}.json")
     scale = _load(RUNS / best["model"] / "scale.json")
@@ -454,7 +471,14 @@ def render_recommendation(
         "## The three options, side by side",
         "",
         _table(
-            ["Option", "Precision", "Recall", "False positives", "Calls per 1,000 images"],
+            [
+                "Option",
+                "Precision",
+                "Recall",
+                "False positives",
+                f"Calls per {scored:,} photographs" if scored else "Calls",
+                "Photographs still calling the model",
+            ],
             [
                 [
                     "**A — generative model, as today**",
@@ -462,6 +486,7 @@ def render_recommendation(
                     _v(incumbent.get("recall"), "%"),
                     _v(incumbent.get("fpr"), "%"),
                     f"{hybrid['budgets'][0]['vlm_calls_today']:,}" if hybrid else "—",
+                    "100%",
                 ],
                 [
                     f"**B — encoder alone** ({best['title']})",
@@ -469,6 +494,7 @@ def render_recommendation(
                     _v(best["recall"], "%"),
                     _v(best["fpr"], "%"),
                     "0",
+                    "0%",
                 ],
             ]
             + (
@@ -479,6 +505,7 @@ def render_recommendation(
                         _v(row["recall"], "%"),
                         _v(row["fpr"], "%"),
                         f"{row['vlm_calls_hybrid']:,} ({_v(row['call_reduction_pct'])}% fewer)",
+                        _v(row["images_pct"], "%"),
                     ]
                     for row in hybrid["budgets"]
                     if row["deferral_budget_pct"] in (10.0, 20.0)
@@ -488,8 +515,11 @@ def render_recommendation(
             ),
         ),
         "",
-        "The generative figures come from the earlier investigation's own run files, recomputed here "
-        "rather than copied from its report.",
+        "The generative figures come from the earlier investigation's own run files, recomputed over "
+        "these same photographs rather than copied from its report.",
+        "",
+        "The last column is the one the call saving is most often read as. Fewer calls per photograph is "
+        "not the same as fewer photographs needing the model, and this result delivers the first.",
         "",
         "## What the encoder is good at, and what it is not",
         "",

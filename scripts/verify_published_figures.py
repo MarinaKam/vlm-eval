@@ -346,6 +346,45 @@ if not missing("vocabulary growth", _base):
     check("largest vocabulary measured", 10000, largest["vocabulary"], 0)
     check("softmax decisions flipped at 10,000 tags", 15110, largest["softmax_rule_decisions_flipped"], 1)
 
+_hybrid = RUNS / "siglip2-so400m-patch14-384" / "hybrid.json"
+if not missing("hybrid curve", _hybrid):
+    hybrid = json.loads(_hybrid.read_text())
+    # The headline of the recommendation, and the figure most easily computed over the wrong population:
+    # it is produced by its own command, so nothing upstream guarantees it counted the same images.
+    check("hybrid scored distinct photographs", 869, hybrid["n_distinct_images"], 0)
+    check("hybrid rows equal distinct photographs", 869, hybrid["n_images"], 0)
+    at20 = next(r for r in hybrid["budgets"] if r["deferral_budget_pct"] == 20.0)
+    check("hybrid at 20%: precision", 88.5, at20["precision"], 0.1)
+    check("hybrid at 20%: recall", 90.0, at20["recall"], 0.1)
+    check("hybrid at 20%: false positives", 1.1, at20["fpr"], 0.1)
+    check("hybrid at 20%: calls", 884, at20["vlm_calls_hybrid"], 0)
+    check("hybrid at 20%: images still needing a call %", 98.3, at20["images_pct"], 0.1)
+
+    # Call accounting, re-derived rather than read: production chunks the questions, so an image with
+    # more borderline tags than fit in a batch costs more than one call.
+
+    tags = json.loads((DATA / "tags.json").read_text())
+    prompts = json.loads((DATA / "prompts.json").read_text())["processing_config"]
+    chunk = prompts["classification_chunk_size"]["value_int"]
+    individual = set(prompts["individual_questions"]["value_json"])
+    order = {"common": 0, "indoor": 1, "outdoor": 2}
+    today = 0
+    with open(DATA / "manifest.csv") as fh:
+        for row in csv.DictReader(fh):
+            if row["image_id"] not in KEEP:
+                continue
+            wanted = {"common", "indoor" if row["image_type"] == "indoor" else "outdoor"}
+            asked = sorted(
+                (t for t in tags if t["category"] in wanted),
+                key=lambda t: (order[t["category"]], t.get("order", 0), t["slug"]),
+            )
+            slugs = [t["slug"] for t in asked]
+            chunks = [slugs[i : i + chunk] for i in range(0, len(slugs), chunk)]
+            singles = sum(1 for c in chunks for sl in c if sl in individual)
+            today += len([c for c in chunks if [sl for sl in c if sl not in individual]]) + singles
+    check("calls the pipeline makes today, over those photographs", 3412, today, 0)
+    check("hybrid reports the same call baseline", today, at20["vlm_calls_today"], 0)
+
 _kept = [r for image_id, r in ref.items() if image_id in KEEP]
 _positives = sum(len(set(r.get("tags") or {}) & set(r.get("evaluable_slugs") or [])) for r in _kept)
 _judged = sum(len(r.get("evaluable_slugs") or []) for r in _kept)
