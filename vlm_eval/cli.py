@@ -422,6 +422,17 @@ def cmd_hybrid(a) -> None:
     rows = dataset.load_jsonl(embedding_run.scores_path(model, rule, calibrated=True))
     if not rows:
         sys.exit(f"no calibrated answers for {model}/{rule} — run `calibrate` first")
+    # The same population as every other table. Left unfiltered, this one curve was computed over all
+    # 1,000 manifest rows while the reports around it counted 869 photographs, and the sentence saying
+    # every figure counts each photograph once was false for exactly these rows.
+    items = dataset.load_manifest()
+    groups = dataset.content_groups(items)
+    if not a.keep_duplicates:
+        unique = dataset.unique_by_content(items)
+        dropped = len(rows) - len([r for r in rows if r["image_id"] in unique])
+        rows = [r for r in rows if r["image_id"] in unique]
+        if dropped:
+            print(f"NOTE: {dropped} row(s) are repeat uploads of a photograph already scored; one row each.")
     fit = json.loads(embedding_run.calibration_path(model, strategy.name).read_text())
     thresholds = fit["whole_set_fit"]["per_tag"]
 
@@ -452,6 +463,8 @@ def cmd_hybrid(a) -> None:
                 "strategy": strategy.name,
                 "threshold_rule": a.threshold_rule,
                 "n_decisions": result["n_decisions"],
+                "n_images": len(rows),
+                "n_distinct_images": len({groups.get(r["image_id"], r["image_id"]) for r in rows}),
                 "budgets": summary,
             },
             indent=2,
@@ -1826,6 +1839,12 @@ def build_parser() -> argparse.ArgumentParser:
         dest="threshold_rule",
         default="per_tag_threshold",
         choices=["per_tag_threshold", "global_threshold"],
+    )
+    s.add_argument(
+        "--keep-duplicates",
+        dest="keep_duplicates",
+        action="store_true",
+        help="include repeat uploads of one photograph, as separate images",
     )
     s.set_defaults(fn=cmd_hybrid)
 
