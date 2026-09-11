@@ -265,9 +265,11 @@ def vocabulary_growth(
     Two questions the ticket runs together. The cost of comparing one image vector against N tag vectors
     is a matrix multiply, measured here at each N. Whether the *answers* change is a property of the
     decision rule rather than of N: thresholding each tag independently has no term referring to any other
-    tag, so the scores are bit-identical however large the vocabulary gets. Normalising across the
-    vocabulary makes every score a function of all the others, and the count of flipped decisions is what
-    that costs.
+    tag, so a tag's score is defined identically however large the vocabulary gets, and the only thing a
+    wider matrix changes is the order the same products are summed in. That is reported as a drift, not as
+    bit-identity — bit-identity held on one machine and not on another, which made it a property of the
+    BLAS build rather than of the method. Normalising across the vocabulary is the opposite case: every
+    score becomes a function of all the others, and the count of flipped decisions is what that costs.
 
     Both halves are vectorised. Built with Python dictionaries this took minutes per checkpoint, which is
     how a measurement quietly stops being run.
@@ -302,7 +304,14 @@ def vocabulary_growth(
             best = elapsed if best is None else min(best, elapsed)
 
         ours = _aggregate_per_slug(sims[:, : own.shape[0]], prototype_set, how)
-        identical = bool(np.array_equal(ours, baseline_agg))
+        # Not bit-identity. Each tag's score is defined without reference to any other tag, so its *value*
+        # cannot depend on the vocabulary — but the product is computed by a BLAS kernel whose blocking
+        # depends on the matrix width, so the summation order changes and the last bits with it. Measured
+        # bit-identical on one machine and not on another, which makes bit-identity a property of the
+        # library rather than of the method. What is portable is the size of the wobble, and whether it is
+        # anywhere near large enough to move a decision.
+        deviation = float(np.max(np.abs(ours - baseline_agg))) if ours.size else 0.0
+        moved = int((np.abs(ours - baseline_agg) > DECISION_SAFE_MARGIN).sum())
 
         # Under normalisation the distractors are candidates too, so they take probability mass from ours.
         candidates = np.concatenate([ours, sims[:, own.shape[0] :]], axis=1) if extra else ours
@@ -314,7 +323,9 @@ def vocabulary_growth(
                 "vocabulary": int(padded.shape[0]),
                 "seconds_for_1000_images": round(best, 5),
                 "microseconds_per_image": round(best / len(ids) * 1e6, 2),
-                "independent_rule_scores_identical": identical,
+                "independent_rule_max_deviation": deviation,
+                "independent_rule_scores_beyond_margin": moved,
+                "independent_rule_bit_identical": bool(np.array_equal(ours, baseline_agg)),
                 "softmax_rule_decisions_flipped": flipped,
                 "softmax_decisions_compared": int(baseline_decision.size),
             }
@@ -340,6 +351,10 @@ def _softmax_rows(scores: np.ndarray, temperature: float) -> np.ndarray:
 
 # Deferral budgets to measure, as a share of all comparable decisions.
 HYBRID_BUDGETS = (0.0, 0.01, 0.02, 0.05, 0.10, 0.20, 0.40)
+
+# A score this far from its threshold is not going to be moved across it by float32 round-off. Cosine
+# similarities here span roughly 0.25, so a millionth is five orders below anything a threshold sits on.
+DECISION_SAFE_MARGIN = 1e-6
 
 
 def _margin_ranked(rows: list[dict], thresholds: dict[str, Any]) -> list[tuple[float, str, str]]:

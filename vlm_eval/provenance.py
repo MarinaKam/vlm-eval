@@ -152,12 +152,19 @@ def describe(run_file: Path) -> dict[str, Any]:
     return out
 
 
-def check(run_file: Path, fp: RunFingerprint, *, log=print) -> None:
+def check(run_file: Path, fp: RunFingerprint, *, log=print, rewritten: bool = False) -> None:
     """Refuse to append to a file produced under different settings.
 
     A file with no sidecar predates this check. Its rows are marked `legacy_unknown` permanently rather
     than adopted as verified: appending to it is allowed, publishing it as a clean measurement is a
     decision somebody has to make with the label in front of them.
+
+    `rewritten=True` is for a file the caller is about to replace in full rather than extend. The hazard
+    this gate exists for is *mixing* — two configurations appended into one file and averaged into a
+    single number — and a file whose every row is about to be overwritten cannot mix with anything. For
+    those, a changed configuration is recorded and named rather than refused. Derived files hit this
+    constantly: rescoring cached vectors after editing a parser is a new experiment, but it is also a new
+    file, and making somebody move the old one aside first buys no safety.
     """
     if not run_file.exists():
         save(run_file, Provenance(fingerprint=fp, status=VERIFIED))
@@ -175,7 +182,14 @@ def check(run_file: Path, fp: RunFingerprint, *, log=print) -> None:
         )
         return
 
-    if previous.fingerprint.digest() == fp.digest() and _unproven(fp.model_identity) and _count_rows(run_file):
+    # The same relaxation, for the same reason: a file about to be replaced in full cannot end up holding
+    # rows from two sets of weights, whether or not the backend can prove which set it is using.
+    if (
+        not rewritten
+        and previous.fingerprint.digest() == fp.digest()
+        and _unproven(fp.model_identity)
+        and _count_rows(run_file)
+    ):
         raise SystemExit(
             f"{run_file.name} has rows, and the backend cannot prove the model weights are unchanged "
             f"({fp.model_identity}).\nA served name is a mutable tag — the same name may now answer "
@@ -185,9 +199,17 @@ def check(run_file: Path, fp: RunFingerprint, *, log=print) -> None:
         )
 
     if previous.fingerprint.digest() != fp.digest():
+        changes = "\n  - ".join(fp.differences(previous.fingerprint))
+        if rewritten:
+            log(
+                f"NOTE: {run_file.name} is being rewritten under changed settings:\n  - {changes}\n"
+                "      Every row is replaced, so nothing from the previous configuration survives in it."
+            )
+            save(run_file, Provenance(fingerprint=fp, status=VERIFIED))
+            return
         raise SystemExit(
             f"{run_file.name} already holds results produced under different settings:\n  - "
-            + "\n  - ".join(fp.differences(previous.fingerprint))
+            + changes
             + "\n\nResuming would mix two experiments in one file and average them into one number. Either\n"
             f"  archive it:  mv {run_file} {run_file}.old  (and {sidecar(run_file).name})\n"
             "  or run under a different model name so the results land separately."

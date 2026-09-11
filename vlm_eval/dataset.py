@@ -68,6 +68,32 @@ def images_digest(items: list[Item] | None = None) -> str:
     return agg.hexdigest()[:16]
 
 
+def content_groups(items: list[Item] | None = None) -> dict[str, str]:
+    """image_id -> a key shared by every image with identical bytes.
+
+    A sampled manifest can contain the same photograph under several ids: a listing re-uploaded, an agency
+    feed repeating a stock shot. 131 of our own 1,000 rows turned out to be 869 distinct files. Left
+    unnoticed that breaks two things at once — a threshold fitted on one fold has already seen an
+    identical image being scored in another, and a photograph that appears seven times counts seven times
+    in every rate.
+    """
+    items = items if items is not None else load_manifest()
+    groups: dict[str, str] = {}
+    for it in items:
+        if it.path.exists():
+            groups[it.image_id] = hashlib.sha256(it.path.read_bytes()).hexdigest()[:16]
+    return groups
+
+
+def unique_by_content(items: list[Item] | None = None) -> set[str]:
+    """One representative image_id per distinct file, chosen by sorted id so the choice is stable."""
+    items = items if items is not None else load_manifest()
+    first: dict[str, str] = {}
+    for image_id, key in sorted(content_groups(items).items()):
+        first.setdefault(key, image_id)
+    return set(first.values())
+
+
 def load_tags(path: Path | None = None, *, active_only: bool = True) -> list[dict]:
     path = path or (DATA / "tags.json" if (DATA / "tags.json").exists() else DATA / "tags_from_migrations.json")
     tags = json.loads(path.read_text())

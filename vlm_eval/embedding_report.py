@@ -27,10 +27,12 @@ BASE_RATE_NOTE = (
 )
 
 
-def base_rate(reference: dict[str, dict], tags_by_image: dict[str, set[str]] | None = None) -> dict[str, float]:
+def base_rate(reference: dict[str, dict], keep: set[str] | None = None) -> dict[str, float]:
     """How often the reference says a tag is present, over the decisions it actually judged."""
     positives = total = 0
-    for row in reference.values():
+    for image_id, row in reference.items():
+        if keep and image_id not in keep:
+            continue
         judged = row.get("evaluable_slugs") or list(row.get("tags") or {})
         total += len(judged)
         positives += len(set(row.get("tags") or {}) & set(judged))
@@ -40,6 +42,39 @@ def base_rate(reference: dict[str, dict], tags_by_image: dict[str, set[str]] | N
         "rate_pct": 100.0 * positives / total if total else 0.0,
         "trivial_accuracy_pct": 100.0 * (total - positives) / total if total else 0.0,
     }
+
+
+def sample_note(reference: dict[str, dict]) -> str:
+    """How many photographs the manifest actually holds, and how steady the reference is on them.
+
+    Two facts that belong beside every rate in these reports. A sampled manifest can hold one photograph
+    under several ids, and counting each upload separately weights a picture by how often it was uploaded
+    while letting a threshold be fitted on an image identical to one it then scores. And where the same
+    bytes appear twice, the reference's own answers to them bound how much of any disagreement is noise
+    rather than a difference between models.
+    """
+    groups: dict[str, list[str]] = {}
+    for image_id, key in dataset.content_groups().items():
+        groups.setdefault(key, []).append(image_id)
+    repeated = [ids for ids in groups.values() if len(ids) > 1]
+    rows = sum(len(ids) for ids in groups.values())
+    unstable = sum(
+        1 for ids in repeated if len({frozenset((reference.get(i) or {}).get("tags") or {}) for i in ids}) > 1
+    )
+    lines = [
+        f"**The sample.** The manifest's {rows:,} rows are {len(groups):,} distinct photographs: "
+        f"{rows - len(groups)} of them are repeat uploads of a picture already in the set, in "
+        f"{len(repeated)} groups. Every figure here scores each photograph once, for the encoders and for "
+        "the models compared against them alike, and copies of one picture are kept in the same "
+        "cross-validation fold.",
+    ]
+    if unstable:
+        lines.append(
+            f"In {unstable} of those {len(repeated)} groups the reference gave **different answers to "
+            "byte-identical images**. That is a floor on how much of any disagreement with it is its own "
+            "noise rather than a difference between models."
+        )
+    return "\n\n".join(lines)
 
 
 def solid_tags(calibration: dict, floor: int) -> list[str]:
@@ -60,6 +95,17 @@ def _load(path: Path) -> dict | None:
     return json.loads(path.read_text()) if path.exists() else None
 
 
+def _rows(path: Path, keep: set[str] | None) -> list[dict]:
+    """Run rows, restricted to one row per distinct photograph unless told otherwise.
+
+    Applied to the generative baselines as well as the encoders. Deduplicating one side of a comparison
+    and not the other would change what the two numbers are about, which is worse than not deduplicating
+    at all.
+    """
+    rows = dataset.load_jsonl(path)
+    return [r for r in rows if r["image_id"] in keep] if keep else rows
+
+
 def strategy_table(model: str, strategies: list[str], slugs: list[str]) -> str:
     """Mean average precision per strategy — threshold-free, so it answers "is the signal there"."""
     rows = []
@@ -69,7 +115,7 @@ def strategy_table(model: str, strategies: list[str], slugs: list[str]) -> str:
     return _table(["Prompt strategy", f"Mean AP over {len(slugs)} tags"], rows)
 
 
-def agreement_table(model: str, strategy: str, reference: dict[str, dict]) -> str:
+def agreement_table(model: str, strategy: str, reference: dict[str, dict], keep: set[str] | None = None) -> str:
     """Precision, recall and false-positive rate at each threshold rule, against the current pipeline."""
     rows = []
     sources = [
@@ -78,7 +124,7 @@ def agreement_table(model: str, strategy: str, reference: dict[str, dict]) -> st
         ("a threshold per tag", f"tagging_embed_{strategy}_per_tag_threshold_cv.jsonl", "fitted out of fold"),
     ]
     for label, filename, provenance in sources:
-        run = dataset.load_jsonl(RUNS / model / filename)
+        run = _rows(RUNS / model / filename, keep)
         if not run:
             rows.append([label, provenance, "—", "—", "—", "—"])
             continue
@@ -133,13 +179,21 @@ def scale_table(scale: dict) -> str:
         [
             f"{row['vocabulary']:,}",
             f"{row['microseconds_per_image']:.2f}",
-            "identical" if row["independent_rule_scores_identical"] else "**changed**",
+            f"{row['independent_rule_max_deviation']:.0e}",
+            f"{row['independent_rule_scores_beyond_margin']:,}",
             f"{row['softmax_rule_decisions_flipped']:,}",
         ]
         for row in scale["sizes"]
     ]
     return _table(
-        ["Vocabulary", "Microseconds per image", "Independent thresholds", "Softmax: decisions flipped"], rows
+        [
+            "Vocabulary",
+            "Microseconds per image",
+            "Independent rule: largest score drift",
+            "Scores moved enough to matter",
+            "Softmax: decisions flipped",
+        ],
+        rows,
     )
 
 
@@ -182,13 +236,14 @@ def render_model(
     reference: dict[str, dict],
     tags: list[dict],
     floor: int,
+    keep: set[str] | None = None,
 ) -> str:
     """One checkpoint's full report."""
     cal = _load(RUNS / model / f"calibration_{best_strategy}.json")
     if not cal:
         return f"# {model}\n\nNot measured — no calibration file for `{best_strategy}`.\n"
     slugs = solid_tags(cal, floor)
-    rate = base_rate(reference)
+    rate = base_rate(reference, keep)
     probe = _load(RUNS / model / "probe.json")
     scale = _load(RUNS / model / "scale.json")
     hybrid = _load(RUNS / model / "hybrid.json")
@@ -222,7 +277,7 @@ def render_model(
         "",
         "## Agreement with the current pipeline (section 3)",
         "",
-        agreement_table(model, best_strategy, reference),
+        agreement_table(model, best_strategy, reference, keep),
         "",
         "## Per tag (section 3)",
         "",
@@ -265,16 +320,17 @@ def render_comparison(
     reference: dict[str, dict],
     floor: int,
     baselines: list[dict[str, Any]] | None = None,
+    keep: set[str] | None = None,
 ) -> str:
     """Every checkpoint in one table, with the generative models measured earlier beside them."""
-    rate = base_rate(reference)
+    rate = base_rate(reference, keep)
     rows = []
     for model in models:
         cal = _load(RUNS / model / f"calibration_{best_strategy}.json")
         if not cal:
             continue
         slugs = solid_tags(cal, floor)
-        run = dataset.load_jsonl(RUNS / model / f"tagging_embed_{best_strategy}_per_tag_threshold_cv.jsonl")
+        run = _rows(RUNS / model / f"tagging_embed_{best_strategy}_per_tag_threshold_cv.jsonl", keep)
         agg = metrics.tagging_agreement(run, reference)["overall"] if run else {}
         card = cards.get(model, {})
         rows.append(
@@ -311,6 +367,8 @@ def render_comparison(
                 rate=rate["rate_pct"],
                 trivial=rate["trivial_accuracy_pct"],
             ),
+            "",
+            sample_note(reference),
             "",
             _table(["Model", "Size", "Mean AP", "Precision", "Recall", "False positives"], rows),
             "",
@@ -351,12 +409,13 @@ def render_recommendation(
     reference: dict[str, dict],
     floor: int,
     baselines: list[dict[str, Any]],
+    keep: set[str] | None = None,
 ) -> str:
     """Option A, Option B or Hybrid — with the number behind each clause."""
     measured = []
     for model in models:
         cal = _load(RUNS / model / f"calibration_{best_strategy}.json")
-        run = dataset.load_jsonl(RUNS / model / f"tagging_embed_{best_strategy}_per_tag_threshold_cv.jsonl")
+        run = _rows(RUNS / model / f"tagging_embed_{best_strategy}_per_tag_threshold_cv.jsonl", keep)
         if not cal or not run:
             continue
         agg = metrics.tagging_agreement(run, reference)["overall"]
@@ -379,16 +438,18 @@ def render_recommendation(
     probe = _load(RUNS / best["model"] / "probe.json")
     cal = _load(RUNS / best["model"] / f"calibration_{best_strategy}.json")
     scale = _load(RUNS / best["model"] / "scale.json")
-    rate = base_rate(reference)
+    rate = base_rate(reference, keep)
 
     lines = [
         "# Should property tagging move to an embedding model?",
         "",
         f"**{choice}** — {because}.",
         "",
-        "Measured on the 1,000 images of the earlier investigation, against the answers the current "
-        "pipeline gave on the same photos. Agreement therefore means *behaves like today*, never *is "
-        "correct*; nothing here is measured against human labels, and that remains the gap.",
+        "Measured on the images of the earlier investigation, against the answers the current pipeline "
+        "gave on the same photos. Agreement therefore means *behaves like today*, never *is correct*; "
+        "nothing here is measured against human labels, and that remains the gap.",
+        "",
+        sample_note(reference),
         "",
         "## The three options, side by side",
         "",
@@ -472,9 +533,11 @@ def render_recommendation(
             "## Adding tags (section 2)",
             "",
             f"At {biggest['vocabulary']:,} tags the comparison costs "
-            f"{biggest['microseconds_per_image']:.1f} microseconds per image, and every existing tag's score "
-            "is **bit-identical** to its score at sixty. That holds because each tag is thresholded on its "
-            "own, with no term referring to any other tag — so adding tags is free in both senses.",
+            f"{biggest['microseconds_per_image']:.1f} microseconds per image, and no existing tag's score "
+            f"moves by more than {biggest['independent_rule_max_deviation']:.0e} — not one of them far "
+            "enough to change a decision. That holds because each tag is thresholded on its own, with no "
+            "term referring to any other tag, so the only difference a larger vocabulary makes is the "
+            "order the same products are summed in.",
             "",
             "It stops holding the moment scores are normalised across the vocabulary, the usual zero-shot "
             f"recipe: at {biggest['vocabulary']:,} candidates that rule changes "

@@ -213,3 +213,43 @@ def test_the_sweep_handles_a_single_decision_and_an_all_positive_set():
     assert best_threshold([Decision("a", "t", 0.4, True)]) == f1_scan([Decision("a", "t", 0.4, True)])
     both = [Decision("a", "t", 0.4, True), Decision("b", "t", 0.4, True)]
     assert best_threshold(both) == f1_scan(both)
+
+
+# ---------------------------------------------------------------- duplicate photographs
+
+
+def test_copies_of_one_photograph_share_a_fold():
+    """Two ids holding identical pixels are one sample, however many times it was uploaded.
+
+    Without the grouping a threshold is fitted on an image that is byte-identical to one it then scores,
+    which is the training set marking its own exam.
+    """
+    rows = [
+        *(Decision(f"copy{i}", "kitchen", 0.9, True) for i in range(4)),
+        *(Decision(f"other{i}", "kitchen", 0.1, False) for i in range(20)),
+    ]
+    groups = {f"copy{i}": "same-photo" for i in range(4)}
+    out = cross_validated(rows, folds=5, seed=7104, min_positives=1, group_of=groups)
+    assert out["split_on"] == "image content"
+
+    placed = {
+        image_id: fold_of(groups.get(image_id, image_id), folds=5, seed=7104) for image_id in {d.image_id for d in rows}
+    }
+    assert len({placed[f"copy{i}"] for i in range(4)}) == 1
+
+
+def test_the_split_records_how_many_distinct_images_it_actually_had():
+    rows = [
+        *(Decision(f"copy{i}", "kitchen", 0.9, True) for i in range(3)),
+        *(Decision(f"other{i}", "kitchen", 0.1, False) for i in range(7)),
+    ]
+    groups = {f"copy{i}": "same-photo" for i in range(3)}
+    out = cross_validated(rows, folds=2, seed=1, min_positives=1, group_of=groups)
+    assert out["n_images"] == 10
+    assert out["n_distinct_images"] == 8
+
+
+def test_without_groups_the_split_says_so():
+    rows = decisions([(0.9, 1), (0.1, 0)])
+    out = cross_validated(rows, folds=2, seed=1, min_positives=1)
+    assert out["split_on"] == "image id"

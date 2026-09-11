@@ -241,6 +241,7 @@ def cross_validated(
     folds: int = 5,
     seed: int = 7104,
     min_positives: int = MIN_POSITIVES_FOR_OWN_THRESHOLD,
+    group_of: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Thresholds fitted on every fold but the one they are applied to.
 
@@ -248,7 +249,13 @@ def cross_validated(
     rule fitted without it. `per_tag` carries the threshold-free average precision over all decisions,
     which needs no split because it never chooses a threshold.
     """
-    assigned = {image_id: fold_of(image_id, folds=folds, seed=seed) for image_id in {d.image_id for d in decisions}}
+    # Split on the group key when one is given, so two ids holding the same photograph share a fold.
+    # Splitting on the id alone let an identical image sit in the training half of its own evaluation.
+    group_of = group_of or {}
+    assigned = {
+        image_id: fold_of(group_of.get(image_id, image_id), folds=folds, seed=seed)
+        for image_id in {d.image_id for d in decisions}
+    }
     predictions_global: dict[str, dict[str, bool | None]] = defaultdict(dict)
     predictions_per_tag: dict[str, dict[str, bool | None]] = defaultdict(dict)
     fitted_per_fold: list[dict[str, Any]] = []
@@ -282,6 +289,8 @@ def cross_validated(
         "min_positives": min_positives,
         "n_decisions": len(decisions),
         "n_images": len(assigned),
+        "n_distinct_images": len({group_of.get(i, i) for i in assigned}),
+        "split_on": "image content" if group_of else "image id",
         "fitted_per_fold": fitted_per_fold,
         "whole_set_fit": fit_thresholds(decisions, min_positives=min_positives),
         "per_tag": per_tag,

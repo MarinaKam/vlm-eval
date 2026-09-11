@@ -65,6 +65,7 @@ def cross_validated_probe(
     folds: int = 5,
     seed: int = 7104,
     min_positives: int = MIN_POSITIVES_FOR_OWN_THRESHOLD,
+    group_of: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Out-of-fold probe scores per tag, reported as average precision so they compare with zero-shot.
 
@@ -86,9 +87,12 @@ def cross_validated_probe(
             skipped.append(slug)
             continue
         scored: list[Decision] = []
+        # Same grouping as the threshold calibration: a photograph present under two ids must not be
+        # trained on and tested against at once.
+        keys = group_of or {}
         for fold in range(folds):
-            train = [r for r in rows if fold_of(r.image_id, folds=folds, seed=seed) != fold]
-            test = [r for r in rows if fold_of(r.image_id, folds=folds, seed=seed) == fold]
+            train = [r for r in rows if fold_of(keys.get(r.image_id, r.image_id), folds=folds, seed=seed) != fold]
+            test = [r for r in rows if fold_of(keys.get(r.image_id, r.image_id), folds=folds, seed=seed) == fold]
             if not test or not any(r.reference_positive for r in train):
                 continue
             x = vectors[[index[r.image_id] for r in train]]

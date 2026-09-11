@@ -246,7 +246,12 @@ def test_vocabulary_growth_leaves_independent_scores_untouched_and_moves_softmax
         word_list=words,
     )
     by_size = {row["vocabulary"]: row for row in result["sizes"]}
-    assert all(row["independent_rule_scores_identical"] for row in result["sizes"])
+    # Not bit-identity: the product is computed by a BLAS kernel whose blocking depends on the matrix
+    # width, so the summation order — and the last bits — can change with the vocabulary. That varies by
+    # machine and library, and asserting it made this test pass locally and fail on CI. What the
+    # arithmetic does guarantee is that no score refers to another tag, so any drift is round-off.
+    assert all(row["independent_rule_max_deviation"] < 1e-5 for row in result["sizes"])
+    assert all(row["independent_rule_scores_beyond_margin"] == 0 for row in result["sizes"])
     # Nothing was added at the smallest size, so nothing can have flipped there.
     assert by_size[4]["softmax_rule_decisions_flipped"] == 0
     # Competing candidates take probability mass, so the normalised rule changes its mind.
@@ -303,3 +308,82 @@ def test_an_image_with_nothing_borderline_costs_no_call_at_all():
     row = result["budgets"][0]
     assert row["vlm_calls_hybrid"] == 0
     assert row["call_reduction_pct"] == 100.0
+
+
+def test_growing_the_vocabulary_cannot_move_a_score_far_enough_to_change_a_decision(tmp_path):
+    """The portable form of the section 2 claim, stated in what floating point actually promises."""
+    words = tmp_path / "words"
+    words.write_text("\n".join("".join(chr(97 + (i // 26**k) % 26) for k in range(4)) for i in range(600)))
+    enc = StubEncoder(context_length=64, dim=8)
+    ps = similarity.build_prototype_set(enc, TAGS, PROTOTYPES, similarity.STRATEGIES["prototypes-max"])
+    rng = np.random.default_rng(7)
+    vectors = rng.normal(size=(20, 8)).astype(np.float32)
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(
+        embedding_run,
+        "load_vectors",
+        lambda model: ([f"i{i}" for i in range(20)], {f"i{i}": "indoor" for i in range(20)}, vectors),
+    ):
+        result = embedding_run.vocabulary_growth(
+            encoder=enc,
+            model="stub",
+            tags=TAGS,
+            prototype_set=ps,
+            strategy=similarity.STRATEGIES["prototypes-max"],
+            sizes=[4, 300],
+            word_list=words,
+        )
+    biggest = result["sizes"][-1]
+    assert biggest["vocabulary"] == 300
+    assert biggest["independent_rule_max_deviation"] < embedding_run.DECISION_SAFE_MARGIN
+    assert biggest["independent_rule_scores_beyond_margin"] == 0
+
+
+# ---------------------------------------------------------------- the gate knows a rewrite from a resume
+
+
+def _fingerprint(**kw):
+    from vlm_eval import provenance
+
+    base = {"task": "similarity", "served_name": "x", "chunk_size": 0, "code": "aaaa"}
+    return provenance.RunFingerprint(**{**base, **kw})
+
+
+def test_a_file_that_is_appended_to_still_refuses_changed_settings(tmp_path):
+    from vlm_eval import provenance
+
+    run = tmp_path / "rows.jsonl"
+    run.write_text('{"image_id": "a"}\n')
+    provenance.check(run, _fingerprint(), log=lambda *_: None)
+    with pytest.raises(SystemExit, match="different settings"):
+        provenance.check(run, _fingerprint(code="bbbb"), log=lambda *_: None)
+
+
+def test_a_file_that_is_replaced_in_full_records_the_change_instead_of_refusing(tmp_path):
+    """Nothing from the old configuration can survive a rewrite, so there is nothing to mix."""
+    from vlm_eval import provenance
+
+    run = tmp_path / "rows.jsonl"
+    run.write_text('{"image_id": "a"}\n')
+    provenance.check(run, _fingerprint(), log=lambda *_: None)
+
+    said = []
+    provenance.check(run, _fingerprint(code="bbbb"), log=said.append, rewritten=True)
+    assert provenance.load(run).fingerprint.code == "bbbb"
+    assert any("rewritten under changed settings" in line for line in said)
+    assert any("code: was 'aaaa', now 'bbbb'" in line for line in said)
+
+
+def test_a_rewrite_is_not_blocked_by_an_unprovable_model_identity(tmp_path):
+    from vlm_eval import provenance
+
+    run = tmp_path / "rows.jsonl"
+    run.write_text('{"image_id": "a"}\n')
+    fp = _fingerprint(model_identity="unknown: no digest")
+    provenance.check(run, fp, log=lambda *_: None)
+    provenance.check(run, fp, log=lambda *_: None, rewritten=True)  # must not raise
+    with pytest.raises(SystemExit, match="cannot prove"):
+        provenance.check(run, fp, log=lambda *_: None)

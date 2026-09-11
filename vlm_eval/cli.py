@@ -229,7 +229,7 @@ def cmd_similarity(a) -> None:
             "tags_truncated": fit["tags_truncated"],
         },
     )
-    provenance.check(out, fp)
+    provenance.check(out, fp, rewritten=True)
     rows = embedding_run.score_rows(
         model=model,
         tags=tags,
@@ -262,7 +262,21 @@ def cmd_calibrate(a) -> None:
         )
 
     decisions = embedding_run.decisions_from_rows(scored, reference)
-    result = calibration.cross_validated(decisions, folds=a.folds, seed=a.seed, min_positives=a.min_positives)
+    groups = dataset.content_groups(items)
+    if not a.keep_duplicates:
+        unique = dataset.unique_by_content(items)
+        dropped = len({d.image_id for d in decisions} - unique)
+        if dropped:
+            print(
+                f"NOTE: {dropped} of {len(items)} manifest rows are byte-identical copies of another image; "
+                "one row per distinct photograph is scored.\n"
+                "      Counting a repeated photo once per id would weight it by how often it was uploaded. "
+                "Pass --keep-duplicates to score them all."
+            )
+        decisions = [d for d in decisions if d.image_id in unique]
+    result = calibration.cross_validated(
+        decisions, folds=a.folds, seed=a.seed, min_positives=a.min_positives, group_of=groups
+    )
     path = embedding_run.calibration_path(model, strategy.name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"strategy": strategy.name, **result}, indent=2, default=str))
@@ -283,7 +297,7 @@ def cmd_calibrate(a) -> None:
                 "min_positives": a.min_positives,
             },
         )
-        provenance.check(out, fp)
+        provenance.check(out, fp, rewritten=True)
         embedding_run.write_rows(out, rows)
         print(f"{out.name}: answers from {rule_name} thresholds fitted out of fold")
 
@@ -340,11 +354,11 @@ def cmd_scale(a) -> None:
     )
     out = embedding_run.RUNS / model / "scale.json"
     out.write_text(json.dumps({**_provenance_stamp(enc, strategy), **result}, indent=2))
-    print(f"\n{'vocabulary':>11} {'us/image':>10} {'independent rule':>18} {'softmax flips':>15}")
+    print(f"\n{'vocabulary':>11} {'us/image':>10} {'max drift':>12} {'moved':>7} {'softmax flips':>15}")
     for row in result["sizes"]:
-        same = "identical" if row["independent_rule_scores_identical"] else "CHANGED"
         print(
-            f"{row['vocabulary']:>11} {row['microseconds_per_image']:>10.2f} {same:>18} "
+            f"{row['vocabulary']:>11} {row['microseconds_per_image']:>10.2f} "
+            f"{row['independent_rule_max_deviation']:12.2e} {row['independent_rule_scores_beyond_margin']:>7} "
             f"{row['softmax_rule_decisions_flipped']:>15}"
         )
     print(f"\n{out.name}: {len(result['sizes'])} vocabulary size(s) measured")
@@ -362,10 +376,15 @@ def cmd_probe(a) -> None:
         sys.exit(f"no scores for {model}/{strategy.name} — run `similarity` first")
 
     ids, _types, vectors = embedding_run.load_vectors(model)
+    decisions = embedding_run.decisions_from_rows(scored, reference)
+    if not a.keep_duplicates:
+        unique = dataset.unique_by_content()
+        decisions = [d for d in decisions if d.image_id in unique]
     result = probe.cross_validated_probe(
         image_ids=ids,
         vectors=vectors,
-        decisions=embedding_run.decisions_from_rows(scored, reference),
+        decisions=decisions,
+        group_of=dataset.content_groups(),
         folds=a.folds,
         seed=a.seed,
         min_positives=a.min_positives,
@@ -447,8 +466,24 @@ def cmd_embedding_report(a) -> None:
 
     reference = dataset.reference_tags_by_image()
     tags = dataset.load_tags()
+    items = dataset.load_manifest()
+    keep = None if a.keep_duplicates else dataset.unique_by_content(items)
+    if keep is not None and len(keep) < len(items):
+        print(
+            f"NOTE: the manifest's {len(items)} rows are {len(keep)} distinct photographs; every table "
+            "below scores each one once, both for the encoders and for the models compared against them."
+        )
     strategies = list(similarity.STRATEGIES)
     presets = _encoder_presets()
+    if SMOKE_PRESET in (a.encoders or []):
+        # The comparison and the recommendation are single files about the whole set of checkpoints, so a
+        # throwaway run rendered into them replaces the real ones. Checking the chain must not be able to
+        # overwrite a deliverable; that happened once, which is why this refuses rather than warns.
+        sys.exit(
+            f"{SMOKE_PRESET!r} is a throwaway run name for checking the chain, not a checkpoint to report "
+            "on — rendering it would overwrite the comparison and the recommendation.\n"
+            f"Name the real presets instead: {', '.join(n for n in presets if n != SMOKE_PRESET)}"
+        )
     chosen = a.encoders or [name for name in presets if name != SMOKE_PRESET]
     models = [presets.get(name, {}).get("run_name", name) for name in chosen]
     cards = {}
@@ -471,12 +506,13 @@ def cmd_embedding_report(a) -> None:
             reference=reference,
             tags=tags,
             floor=a.min_positives,
+            keep=keep,
         )
         out = REPORTS / f"embedding-{run_name}.md"
         out.write_text(text)
         written.append(out)
 
-    baselines = json.loads(Path(a.baselines).read_text()) if a.baselines else _known_baselines()
+    baselines = json.loads(Path(a.baselines).read_text()) if a.baselines else _known_baselines(keep)
     comparison = REPORTS / "embedding-comparison.md"
     comparison.write_text(
         embedding_report.render_comparison(
@@ -487,6 +523,7 @@ def cmd_embedding_report(a) -> None:
             reference=reference,
             floor=a.min_positives,
             baselines=baselines,
+            keep=keep,
         )
     )
     written.append(comparison)
@@ -500,6 +537,7 @@ def cmd_embedding_report(a) -> None:
             reference=reference,
             floor=a.min_positives,
             baselines=baselines,
+            keep=keep,
         )
     )
     written.append(recommendation)
@@ -507,7 +545,7 @@ def cmd_embedding_report(a) -> None:
         print(f"wrote {path}")
 
 
-def _known_baselines() -> list[dict]:
+def _known_baselines(keep: set[str] | None = None) -> list[dict]:
     """Generative models measured in the earlier investigation, read from their own metrics files.
 
     Typed into this report by hand once, and that is exactly how a figure drifts — so they are recomputed
@@ -522,6 +560,8 @@ def _known_baselines() -> list[dict]:
     out = []
     for run_name, title, params in known:
         rows = dataset.load_jsonl(runner.tagging_out(run_name, 15))
+        if keep:
+            rows = [r for r in rows if r["image_id"] in keep]
         if not rows:
             continue
         agg = metrics.tagging_agreement(rows, reference)["overall"]
@@ -1611,7 +1651,13 @@ def cmd_compare(a) -> None:
     print(f"wrote {out}")
 
 
-def main(argv=None) -> None:
+def build_parser() -> argparse.ArgumentParser:
+    """Every command and flag, built without parsing anything.
+
+    Separate from `main` so it can be inspected. A handler reading `a.keep_duplicates` from a
+    subcommand whose parser never defined it is invisible to unit tests and to `--help`, and shows up
+    only when somebody runs that one command — which is exactly how it reached a user once.
+    """
     p = argparse.ArgumentParser(prog="vlm-eval")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -1729,6 +1775,12 @@ def main(argv=None) -> None:
         default=calibration.MIN_POSITIVES_FOR_OWN_THRESHOLD,
         help="positives a tag needs before it gets its own threshold instead of the global one",
     )
+    s.add_argument(
+        "--keep-duplicates",
+        dest="keep_duplicates",
+        action="store_true",
+        help="score every manifest row, including byte-identical copies of the same photograph",
+    )
     s.set_defaults(fn=cmd_calibrate)
 
     s = sub.add_parser("scale", help="how cost and answers change as the tag vocabulary grows")
@@ -1756,6 +1808,12 @@ def main(argv=None) -> None:
     s.add_argument(
         "--min-positives", dest="min_positives", type=int, default=calibration.MIN_POSITIVES_FOR_OWN_THRESHOLD
     )
+    s.add_argument(
+        "--keep-duplicates",
+        dest="keep_duplicates",
+        action="store_true",
+        help="fit on every manifest row, including repeated uploads of one photograph",
+    )
     s.set_defaults(fn=cmd_probe)
 
     s = sub.add_parser("hybrid", help="embedding decides the confident tags, a VLM is asked the rest")
@@ -1778,6 +1836,12 @@ def main(argv=None) -> None:
         "--min-positives", dest="min_positives", type=int, default=calibration.MIN_POSITIVES_FOR_OWN_THRESHOLD
     )
     s.add_argument("--baselines", default=None, help="JSON file of generative models to show alongside")
+    s.add_argument(
+        "--keep-duplicates",
+        dest="keep_duplicates",
+        action="store_true",
+        help="score every manifest row, including repeated uploads of one photograph",
+    )
     s.set_defaults(fn=cmd_embedding_report)
 
     s = sub.add_parser("review", help="judge model-vs-reference disagreements by eye")
@@ -1840,7 +1904,11 @@ def main(argv=None) -> None:
         help="render even if the inputs are still placeholders (the report will say so)",
     )
     s.set_defaults(fn=cmd_economics)
+    return p
 
+
+def main(argv=None) -> None:
+    p = build_parser()
     a = p.parse_args(argv)
     a.fn(a)
 

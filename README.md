@@ -259,7 +259,9 @@ file. The one backend caveat: a plain vLLM/OpenAI endpoint reports a model name 
 so fresh runs work fully there while automatic resume of a non-empty file is refused.
 
 Change any of it and the next run stops and names what changed; archive the file or pick another run
-name. Every backend goes through the same gate — a served model, Florence-2, PaliGemma, a throughput
+name. The exception is a file the command *replaces* rather than extends — rescoring cached
+vectors writes every row afresh, so there is nothing for two configurations to mix in, and the change is
+recorded and named instead of refused. Every backend goes through the same gate — a served model, Florence-2, PaliGemma, a throughput
 run — and a test walks the CLI's syntax tree to prove no path writes rows around it.
 
 A file that existed before any of this was recorded is a third case, and stamping it with today's

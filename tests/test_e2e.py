@@ -7,6 +7,7 @@ layout, resume, parsing, metric maths, report rendering — is the production co
 A second test drives the same chain through the CLI, so the argument wiring is covered too.
 """
 
+import argparse
 import csv
 import io
 import json
@@ -1550,3 +1551,51 @@ def test_the_heavy_dependencies_are_never_imported_at_module_level():
                 names = [node.module]
             offenders.extend(f"{path.name}: {n}" for n in names if n.split(".")[0] in heavy)
     assert not offenders, f"imported at module level, which the base install cannot satisfy: {offenders}"
+
+
+def test_every_subcommand_defines_the_flags_its_handler_reads():
+    """A handler reading `a.keep_duplicates` from a parser that never defined it is invisible until run.
+
+    Unit tests call the functions directly with objects that happen to carry the attribute, and `--help`
+    shows the flags the parser knows rather than the ones the code wants. The only place the two meet is
+    a live invocation of that one subcommand, which is how a missing flag reached a user. This walks each
+    handler's source for attribute reads off its argument and checks the parser it is wired to.
+    """
+    import ast
+    import inspect
+
+    from vlm_eval import cli
+
+    parser = cli.build_parser()
+    subparsers = [a for a in parser._actions if isinstance(a, argparse._SubParsersAction)]
+    assert subparsers, "the CLI has no subcommands"
+
+    # `_resolve` fills connection details in from a preset at runtime, so a handler that calls it may
+    # legitimately read fields its own parser never declared. Those names are read out of `_resolve`
+    # itself rather than listed here, and are allowed only for the handlers that actually call it.
+    resolved = {
+        node.elts[0].value
+        for node in ast.walk(ast.parse(inspect.getsource(cli._resolve)))
+        if isinstance(node, ast.Tuple) and node.elts and isinstance(node.elts[0], ast.Constant)
+    }
+    assert "extra_output_tokens" in resolved, "the fields _resolve injects could not be read from it"
+
+    missing = []
+    for name, sub in subparsers[0].choices.items():
+        handler = sub.get_default("fn")
+        if handler is None:
+            continue
+        tree = ast.parse(inspect.getsource(handler))
+        func = tree.body[0]
+        arg_name = func.args.args[0].arg if func.args.args else None
+        calls = {ast.unparse(n.func) for n in ast.walk(func) if isinstance(n, ast.Call)}
+        defined = {action.dest for action in sub._actions} | set(sub._defaults)
+        if "_resolve" in calls:
+            defined |= resolved
+        read = {
+            node.attr
+            for node in ast.walk(func)
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == arg_name
+        }
+        missing.extend(f"{name}: handler reads a.{attr}, parser never defines it" for attr in sorted(read - defined))
+    assert not missing, "\n".join(missing)
