@@ -6,8 +6,13 @@ __pycache__/
 # Machine/company-specific config — never commit
 .env
 
-# Dataset: exported from a private DB (client images, model outputs, prompt texts) — never commit
+# Dataset: exported from a private DB (client images, model outputs, prompt texts) — never commit.
+# Any data directory, not just `data/`: a full export went to `data-full/` and slipped past `data/`.
 data/
+data-*/
+# Exported dataset files, wherever they land, as a second line of defence.
+manifest.csv
+*.jsonl
 
 # Run outputs and rendered reports: derived from private data — never commit
 runs/
