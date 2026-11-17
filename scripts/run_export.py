@@ -1,8 +1,12 @@
 """Load the source app's .env (without shell interpretation) and run the dataset export via manage.py shell.
 
+Behind `vlm-eval export`. The export it runs, export_staging_dataset.py, is a template written against one
+Django schema — see that file and docs/datasets.md before pointing this at your own application.
+
     <source-repo>/.venv/bin/python scripts/run_export.py
 
-Needs VLM_EVAL_SOURCE_REPO (see .env.example). Prints which DB host is used (no password) before running.
+Needs VLM_EVAL_SOURCE_REPO and VLM_EVAL_SOURCE_APP (see docs/datasets.md). Prints which DB host is used (no
+password) before running.
 READ-ONLY export.
 """
 

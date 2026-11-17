@@ -1,21 +1,23 @@
-"""Count processed images per month (READ-ONLY) — the number that decides self-host vs pay-per-call.
+"""TEMPLATE: count processed images per month (read-only) — the number that decides per-hour vs per-image.
 
-Like the export script, this one is written against a particular Django schema: adapt the model names
-and field names to your own, or replace it with the equivalent query for your backend.
+Like the export scripts, this is written against one particular Django schema. Set VLM_EVAL_SOURCE_APP
+(and VLM_EVAL_SOURCE_MODELS if your class names differ) and adapt the field names and status values to
+your own, or replace it with the equivalent query for your backend.
 
-Run through the wrapper so the source app's environment is loaded:
+Run through `vlm-eval volume`, or through the wrapper so the source application's environment is loaded:
 
-    python scripts/run_source_manage.py shell < scripts/count_volume.py
+    python scripts/run_source_manage.py shell --stdin scripts/count_volume.py
 
-Prints, per calendar month: completed image jobs, failed jobs, distinct listings, and the
-indoor/outdoor split where it can be inferred (outdoor images ask fewer questions and cost less).
+Prints, per calendar month: completed image jobs, failed jobs and listings; then the busiest
+days and hours, the share of hours with any work, and the size distribution of one upload.
 Nothing is written anywhere.
 """
 
+import importlib
+import os
 from collections import Counter, defaultdict
 from datetime import timedelta
 
-from computer_vision.models import ImageProcessingJob, PropertyProcessingJob
 from django.db import connection
 from django.db.models import Count
 from django.db.models.functions import TruncMonth
@@ -27,11 +29,47 @@ with connection.cursor() as _cur:
     _cur.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
 print("session set to read only")
 
+# ---------------------------------------------------------------- source schema (ADAPT THIS)
+# Everything below is written against ONE Django schema. Two settings say where that schema lives; the
+# queries still assume its field names and status values, so on a different schema edit the queries
+# too, not only these names.
+#
+#   VLM_EVAL_SOURCE_APP     label of the Django app whose `models` module holds the classes below
+#   VLM_EVAL_SOURCE_MODELS  optional `role=ClassName` pairs, comma-separated, for classes whose names
+#                           differ from the placeholders in SOURCE_MODELS
+_app = os.environ.get("VLM_EVAL_SOURCE_APP")
+if not _app:
+    raise SystemExit("VLM_EVAL_SOURCE_APP is not set — the label of the Django app that holds the source models")
+SOURCE_MODELS = {
+    "image_job": "ImageJob",  # one processing job per image: status, created_at, user_id
+    "listing_job": "ListingJob",  # one listing (a group of images): its images, a summary text, status
+}
+SOURCE_MODELS.update(
+    pair.strip().split("=", 1) for pair in os.environ.get("VLM_EVAL_SOURCE_MODELS", "").split(",") if "=" in pair
+)
+_source_models = importlib.import_module(f"{_app}.models")
+
+
+def source(role: str):
+    """The class playing `role` in the source app, or a message naming what to configure."""
+    name = SOURCE_MODELS[role].strip()
+    try:
+        return getattr(_source_models, name)
+    except AttributeError:
+        raise SystemExit(
+            f"{_app}.models has no {name!r} (role {role!r}). This script is a template for one schema: "
+            f"set VLM_EVAL_SOURCE_MODELS={role}=<YourClass>, or adapt the queries."
+        ) from None
+
+
+ImageJob = source("image_job")
+ListingJob = source("listing_job")
+
 MONTHS_BACK = 12
 since = timezone.now() - timedelta(days=30 * MONTHS_BACK)
 
 rows = (
-    ImageProcessingJob.objects.filter(created_at__gte=since)
+    ImageJob.objects.filter(created_at__gte=since)
     .annotate(month=TruncMonth("created_at"))
     .values("month", "status")
     .annotate(n=Count("id"))
@@ -43,7 +81,7 @@ for r in rows:
     per_month[r["month"].date().replace(day=1)][r["status"]] += r["n"]
 
 props = (
-    PropertyProcessingJob.objects.filter(created_at__gte=since)
+    ListingJob.objects.filter(created_at__gte=since)
     .annotate(month=TruncMonth("created_at"))
     .values("month")
     .annotate(n=Count("id"))
@@ -78,21 +116,21 @@ if months:
 from django.db.models.functions import TruncDay, TruncHour  # noqa: E402
 
 days = (
-    ImageProcessingJob.objects.filter(created_at__gte=since, status="completed")
+    ImageJob.objects.filter(created_at__gte=since, status="completed")
     .annotate(d=TruncDay("created_at"))
     .values("d")
     .annotate(n=Count("id"))
     .order_by("-n")[:5]
 )
 hours = (
-    ImageProcessingJob.objects.filter(created_at__gte=since, status="completed")
+    ImageJob.objects.filter(created_at__gte=since, status="completed")
     .annotate(h=TruncHour("created_at"))
     .values("h")
     .annotate(n=Count("id"))
     .order_by("-n")[:5]
 )
 hour_rows = (
-    ImageProcessingJob.objects.filter(created_at__gte=since, status="completed")
+    ImageJob.objects.filter(created_at__gte=since, status="completed")
     .annotate(h=TruncHour("created_at"))
     .values("h")
     .annotate(n=Count("id"))
@@ -110,15 +148,15 @@ print(f"\nhours with at least one job: {busy_hours:,} of ~{span_hours:,} ({100 *
 print("(the lower that share, the more a scale-to-zero GPU beats one that is always on)")
 
 # --- the shape of one upload ----------------------------------------------------------------------
-# Monthly and hourly totals say how much work arrives; they do not say how it arrives. A client who
-# uploads one listing of 40 photographs and a client who uploads 40 listings of one are the same point
+# Monthly and hourly totals say how much work arrives; they do not say how it arrives. One listing of
+# 40 images and 40 listings of one image are the same point
 # on the hourly chart and completely different problems for a queue. What a person waiting on a result
 # experiences is the size of their own upload, not the monthly average — so measure that distribution
 # and let the report answer "what if someone sends 500 at once" with a number instead of a shrug.
 print("\n=== the shape of one upload ===")
 
 sizes = sorted(
-    PropertyProcessingJob.objects.filter(created_at__gte=since)
+    ListingJob.objects.filter(created_at__gte=since)
     .annotate(n=Count("images"))
     .filter(n__gt=0)
     .values_list("n", flat=True)
@@ -143,7 +181,7 @@ else:
 # How many uploads land in the same hour: one 500-image listing needs a fast worker, five hundred
 # 1-image listings arriving together need a deep queue. They size differently.
 per_hour = (
-    PropertyProcessingJob.objects.filter(created_at__gte=since)
+    ListingJob.objects.filter(created_at__gte=since)
     .annotate(h=TruncHour("created_at"))
     .values("h")
     .annotate(n=Count("id"))
