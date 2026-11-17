@@ -1,45 +1,61 @@
-# Backlog
+# Roadmap and known gaps
 
-Deferred deliberately, with the reason. Not a wish list.
+Work that has been deferred on purpose, with the reason, and gaps that are known. This is not a wish
+list.
 
-## Generalise the database export beyond one Django schema
+## Deferred
 
-`scripts/export_staging_dataset.py`, `scripts/count_volume.py` and
-`scripts/extract_tags_from_migrations.py` import concrete model classes (`ImageProcessingJob`,
-`ClassificationTag`, …) from one application. Anyone on another schema — or another stack — has to
-rewrite them.
+### A generic dataset export
 
-**Why it is deferred:** an abstraction over "any backend's tag storage" would be guesswork, and a
-half-generic exporter is more misleading than an honest template. The harness itself is already
-decoupled: it reads six plain files from `data/`, documented in the README, and does not care how they
-were produced.
+The scripts behind `vlm-eval export` and `vlm-eval volume` are templates written against one Django
+schema ([datasets.md](datasets.md#the-export-templates)). Anyone on another schema or stack adapts them
+or writes the data files directly.
 
-**What would make it worth doing:** a second real schema to export from. Two concrete cases show which
-parts actually vary; one case only produces a fake abstraction.
+An abstraction over "any application's tag storage" built from a single example would be guesswork, and
+a half-generic exporter is more misleading than an honest template. The harness itself is already
+decoupled: it reads plain files and does not care how they were produced. A second real schema would
+show which parts actually vary; the likely shape is a small mapping file consumed by a generic
+exporter, with the current script kept as the reference implementation.
 
-**Shape it might take:** a small mapping file (model name, field names, status values) consumed by a
-generic exporter, with the current script kept as the reference implementation.
+### Robustness to perturbation
 
-## Robustness to perturbation, not just repetition
+`--repeats` measures whether a model answers the same way twice. At temperature 0 that is close to
+guaranteed by greedy decoding, so it shows that the serving stack is reproducible, not that the model
+is stable.
 
-`--repeats` measures whether a model answers the same way twice. At `temperature=0` that is guaranteed
-by greedy decoding, so it proves the serving stack is reproducible, not that the model is stable.
+The informative test is the same scene slightly changed: a different crop, a few degrees of rotation,
+heavier compression. Beyond perturbations, an acceptance set should include look-alike classes and
+small objects inside a larger scene, which are the cases where an image-text encoder used as a cheap
+first pass is weakest.
 
-The informative test is the same scene slightly changed: different crop, a few degrees of rotation,
-heavier compression. That is where models diverge, and it predicts behaviour on the photos people
-actually upload. The plumbing exists (`--repeats` plus a transform step in `dataset.optimize`).
+### Neutral names for the reference
 
-**Extend the acceptance matrix with look-alikes and small-object cases.** A perturbation set built from
-crop, rotation and compression alone under-tests the failure mode that matters most for an encoder used as
-a cheap first pass: it reads room-level tags far more reliably than fine detail, or anything defined by an
-exclusion. The cases that separate those are a visually similar class and a small object inside a larger
-scene, and neither is a perturbation of the original photograph.
+Some names still refer to the vendor the first dataset came from: the older `gemini_*.jsonl` file
+names (still read), the `gemini_summary` field in summary rows, `gemini_correct_pct` in the review
+metrics, and a few labels in the review page and the model report. Renaming them breaks existing run
+files and metrics, so it is deferred until a migration is justified for another reason.
 
-## Rename the reference-model fields
+### Neutral names and categories in the data model
 
-`gemini_tags.jsonl`, `gemini_captions.jsonl`, the `gemini` argument in `metrics`/`review`, and the
-`gemini_summary` field in summary rows all name one vendor in a tool meant for any of them.
+The file `properties.jsonl` and its `property_job_id` and `property_summary` fields, and the image
+types `indoor` and `outdoor`, come from the first dataset. Generalising them (arbitrary category names,
+a neutral file name for listings) changes file formats and run-file fingerprints, so it is deferred for
+the same reason. The built-in fallback summary prompt is also specific to that first dataset; a
+dataset should always carry its own prompt in `data/prompts.json`.
 
-**Why it is deferred:** renaming breaks existing run files and reports for a purely cosmetic gain. Worth
-doing the first time someone evaluates against a different reference API — at that point the rename pays
-for itself and a migration is justified anyway.
+## Known gaps
+
+- **vLLM has not been run against a live server.** The request format, schema-constrained output and
+  logprob parsing are covered by mocks only ([usage.md](usage.md#checking-the-vllm-path)).
+- **InternVL and PaliGemma backends have not been executed.** Their routing is tested.
+- **API keys.** The built-in server backend sends a placeholder bearer token, and no command-line
+  option sets a real one.
+- **`sweep` and the dataset's batch size.** `sweep` runs its tagging stage with 15 questions per call
+  instead of reading the batch size from the dataset, and it cannot pass `--allow-defaults`.
+- **`report` with a relocated report directory.** When `VLM_EVAL_REPORT_DIR` points outside the
+  repository and the model has no card file, `report` fails while printing the note about the missing
+  card. Creating the card file avoids it.
+- **`vlm-eval verify` is project-specific.** It checks the author's own published figures and is a
+  pattern to copy, not a general check ([design.md](design.md#independent-verification)).
+- **Cost estimates are simple.** They multiply throughput by an hourly price and do not model idle
+  time beyond always-on capacity, autoscaling headroom or egress.
