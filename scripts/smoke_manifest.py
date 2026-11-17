@@ -1,8 +1,9 @@
-"""Build a tiny data/manifest.csv from local JPGs to smoke-test the harness before the staging export.
+"""Build a tiny data/manifest.csv from local images to smoke-test the harness without any export.
 
     python scripts/smoke_manifest.py <dir_with_jpgs> <indoor|outdoor> [limit]
 
-Copies (optimized) images into data/images/<n>.jpg with ids 900001+, no Gemini ground truth.
+Copies (optimized) images into data/images/<n>.jpg with ids 900001+. There are no reference
+answers, so runs work but agreement cannot be computed.
 """
 
 import csv

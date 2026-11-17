@@ -1,40 +1,33 @@
-"""Export the WHOLE CV dataset from the source app's DB (READ-ONLY), not the sampled 1000.
+"""TEMPLATE: export every image a Django application's database holds (read-only), not a sample.
 
-`export_staging_dataset.py` builds a balanced 1000-image benchmark: greedy tag cover, a 650/350 fill,
-a 180-day window. This one does the opposite — every image the database has, with everything attached —
-for standing up an independent copy of the corpus. Same file formats, so the harness reads either one.
+`export_staging_dataset.py` builds a balanced benchmark: a greedy tag cover, a fixed fill per image
+type, a time window. This one does the opposite — every image the database has, with everything
+attached — for standing up an independent copy of the corpus. Same file formats, so the harness reads
+either one.
 
-    scripts/run_source_manage.py shell --db-from <staging.env> --stdin scripts/export_full_dataset.py
+Like the sampled export, this is written against one particular Django schema. Set VLM_EVAL_SOURCE_APP
+(and VLM_EVAL_SOURCE_MODELS if your class names differ) and adapt the queries to your field names.
+
+    scripts/run_source_manage.py shell --db-from <other-deployment.env> --stdin scripts/export_full_dataset.py
 
 Writes to $VLM_EVAL_DATA_DIR (a fresh, empty directory is wise — this is the full corpus):
-  manifest.csv          image_id,url,s3_url,image_type,size,is_processed,is_failed,user_id,created_at
-  reference_tags.jsonl  {"image_id","image_type","tags":{slug:conf},"evaluable_slugs":[...]}
+  manifest.csv              image_id,url,s3_url,image_type,size,is_processed,is_failed,user_id,created_at
+  reference_tags.jsonl      {"image_id","image_type","tags":{slug:conf},"evaluable_slugs":[...]}
   reference_captions.jsonl  {"image_id","captions":{slug:text}}
   tags.json / prompts.json / features.json   the config catalogs, identical to the sampled export
-  properties.jsonl      every completed property job with a summary (no cap)
+  properties.jsonl          every completed listing that has a summary (no cap)
 
-Streams in chunks so 21k images and their ~1-2M feature rows never all sit in memory at once. Only
+Streams in chunks so a large image table and its feature rows never sit in memory at once. Only
 SELECTs; writes nothing back to the database.
 """
 
 import csv
 import functools
+import importlib
 import json
 import os
 from collections import defaultdict
 from pathlib import Path
-
-from computer_vision.models import (
-    ClassificationTag,
-    FeatureType,
-    Image,
-    ImageFeature,
-    ImageProcessingFeature,
-    ProcessingConfig,
-    Prompt,
-    PromptTemplate,
-    PropertyProcessingJob,
-)
 
 json_dumps = functools.partial(json.dumps, default=str)
 
@@ -45,9 +38,59 @@ OUT_DIR = Path(os.path.expanduser(_out))
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 CHUNK = int(os.environ.get("VLM_EVAL_CHUNK", "2000"))
 
+# ---------------------------------------------------------------- source schema (ADAPT THIS)
+# Everything below is written against ONE Django schema. Two settings say where that schema lives; the
+# queries still assume its field names and status values, so on a different schema edit the queries
+# too, not only these names.
+#
+#   VLM_EVAL_SOURCE_APP     label of the Django app whose `models` module holds the classes below
+#   VLM_EVAL_SOURCE_MODELS  optional `role=ClassName` pairs, comma-separated, for classes whose names
+#                           differ from the placeholders in SOURCE_MODELS
+_app = os.environ.get("VLM_EVAL_SOURCE_APP")
+if not _app:
+    raise SystemExit("VLM_EVAL_SOURCE_APP is not set — the label of the Django app that holds the source models")
+SOURCE_MODELS = {
+    "tag": "Tag",  # one yes/no question: slug, name, question_text, category, order, is_active
+    "feature_kind": "FeatureKind",  # enum with CLASSIFICATION and CAPTION members
+    "image": "Image",  # one stored image: id, url, s3_url
+    "image_answer": "ImageAnswer",  # one stored answer per (image, feature): confidence, literal_value
+    "feature": "Feature",  # what can be answered about an image: slug, type, is_active
+    "setting": "PipelineSetting",  # key/value pipeline settings: key, value_int, value_json, ...
+    "prompt": "Prompt",  # caption prompt texts, keyed by feature
+    "prompt_template": "PromptTemplate",  # named prompt templates: slug, text, is_active
+    "listing_job": "ListingJob",  # one listing (a group of images): its images, a summary text, status
+}
+SOURCE_MODELS.update(
+    pair.strip().split("=", 1) for pair in os.environ.get("VLM_EVAL_SOURCE_MODELS", "").split(",") if "=" in pair
+)
+_source_models = importlib.import_module(f"{_app}.models")
+
+
+def source(role: str):
+    """The class playing `role` in the source app, or a message naming what to configure."""
+    name = SOURCE_MODELS[role].strip()
+    try:
+        return getattr(_source_models, name)
+    except AttributeError:
+        raise SystemExit(
+            f"{_app}.models has no {name!r} (role {role!r}). This script is a template for one schema: "
+            f"set VLM_EVAL_SOURCE_MODELS={role}=<YourClass>, or adapt the queries."
+        ) from None
+
+
+Tag = source("tag")
+FeatureKind = source("feature_kind")
+Image = source("image")
+ImageAnswer = source("image_answer")
+Feature = source("feature")
+PipelineSetting = source("setting")
+Prompt = source("prompt")
+PromptTemplate = source("prompt_template")
+ListingJob = source("listing_job")
+
 # ---------------------------------------------------------------- config catalogs (same as the sample)
 all_tags = list(
-    ClassificationTag.objects.order_by("category", "order", "slug").values(
+    Tag.objects.order_by("category", "order", "slug").values(
         "slug", "name", "question_text", "category", "order", "is_active"
     )
 )
@@ -58,10 +101,12 @@ print(f"tags.json: {len(all_tags)} classification tags ({len(active_tags)} activ
 _active_prompts = Prompt.objects.select_related("key").filter(key__is_active=True)
 caption_prompts = {p["key__slug"]: p["text"] for p in _active_prompts.values("key__slug", "text")}
 templates = {t["slug"]: t["text"] for t in PromptTemplate.objects.filter(is_active=True).values("slug", "text")}
-templates.setdefault("caption_header", "You are a helpful SEO expert in the real estate area.")
+_caption_header = os.environ.get("VLM_EVAL_CAPTION_HEADER")  # see export_staging_dataset.py
+if _caption_header:
+    templates.setdefault("caption_header", _caption_header)
 configs = {
     c["key"]: {k: v for k, v in c.items() if k != "key" and v is not None}
-    for c in ProcessingConfig.objects.filter(is_active=True).values(
+    for c in PipelineSetting.objects.filter(is_active=True).values(
         "key", "value_text", "value_int", "value_float", "value_bool", "value_json"
     )
 }
@@ -74,10 +119,10 @@ configs = {
 )
 print(f"prompts.json: {len(caption_prompts)} caption prompts, {len(templates)} templates, {len(configs)} configs")
 
-features = list(ImageProcessingFeature.objects.values("id", "slug", "type", "is_active", "show_in_classification"))
+features = list(Feature.objects.values("id", "slug", "type", "is_active", "show_in_classification"))
 (OUT_DIR / "features.json").write_text(json_dumps(features, indent=2))
-classification_ids = {f["id"] for f in features if f["type"] == FeatureType.CLASSIFICATION and f["is_active"]}
-caption_ids = {f["id"] for f in features if f["type"] == FeatureType.CAPTION}
+classification_ids = {f["id"] for f in features if f["type"] == FeatureKind.CLASSIFICATION and f["is_active"]}
+caption_ids = {f["id"] for f in features if f["type"] == FeatureKind.CAPTION}
 cat_by_slug = {t["slug"]: t["category"] for t in active_tags}
 type_slugs = {"indoor", "outdoor", "other", "split"}
 
@@ -96,7 +141,7 @@ written = with_tags = with_caps = 0
 try:
     last_id = None
     while True:
-        # Keyset paging by id, so the DB never sorts or offsets the whole 21k table per page.
+        # Keyset paging by id, so the DB never sorts or offsets the whole table per page.
         page = base.filter(id__gt=last_id) if last_id else base
         chunk = list(
             page.values("id", "url", "s3_url", "size", "is_processed", "is_failed", "user_id", "created_at")[:CHUNK]
@@ -106,12 +151,12 @@ try:
         ids = [r["id"] for r in chunk]
         last_id = ids[-1]
 
-        # Feature rows for just this chunk: tags (conf>0), the stored indoor/outdoor verdict, and captions.
+        # Feature rows for just this chunk: tags (conf>0), the stored image-type verdict, and captions.
         tags_by_image: dict = defaultdict(dict)
         evaluable: dict = defaultdict(set)
         caps: dict = defaultdict(dict)
         stored_type: dict = {}
-        for r in ImageFeature.objects.filter(image_id__in=ids).values(
+        for r in ImageAnswer.objects.filter(image_id__in=ids).values(
             "image_id", "feature_id", "feature__slug", "confidence", "literal_value"
         ):
             slug = r["feature__slug"]
@@ -167,9 +212,9 @@ finally:
     ref_caps.close()
 print(f"manifest + references: {written:,} images ({with_tags:,} have tags, {with_caps:,} have captions)")
 
-# ---------------------------------------------------------------- every property job with a summary
+# ---------------------------------------------------------------- every listing with a summary
 props = (
-    PropertyProcessingJob.objects.filter(status="completed")
+    ListingJob.objects.filter(status="completed")
     .exclude(property_summary__isnull=True)
     .exclude(property_summary="")
     .order_by("-created_at")
@@ -195,5 +240,5 @@ with (OUT_DIR / "properties.jsonl").open("w") as fh:
             + "\n"
         )
         written_props += 1
-print(f"properties.jsonl: {written_props:,} property jobs with a summary")
+print(f"properties.jsonl: {written_props:,} listings with a summary")
 print(f"done -> {OUT_DIR}")

@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """Draft `data/prototypes.json` from `data/tags.json` — caption-shaped prompts for an encoder.
 
-Why a draft rather than a finished file: the prompts an encoder needs are captions ("a kitchen with a
-central island"), while a tag definition is an instruction written for a model that reads instructions.
+Why a draft rather than a finished file: the prompts an encoder needs are captions ("a bicycle leaning
+against a wall"), while a tag definition is an instruction written for a model that reads instructions.
 Deriving the caption from the tag's own name gets most of them right and some of them wrong — a tag
-named "Watermark" or "Disabled Access" is not a thing a photograph can contain in those words. Those
-need a human sentence, so every entry is written with `"review": true` and the harness prints how many
-are still unreviewed.
+named "Watermark" or "Low Quality" is not a thing a photograph can contain in those words. Those
+need a human sentence, so every entry is written with `"reviewed_by": "generator"` and the harness
+prints how many are still unreviewed.
 
 Nothing about any particular domain lives in this file: the names, the questions and the exclusion
 phrasing all come from `data/tags.json`, and the edited result stays in `data/`, which is gitignored.
@@ -26,8 +26,8 @@ DATA = Path(__file__).resolve().parent.parent / "data"
 FRAMES = (
     "a photo of {subject}",
     "{subject}",
-    "an interior photo showing {subject}",
-    "a real estate photograph of {subject}",
+    "a photo showing {subject}",
+    "a photograph of {subject}",
 )
 
 # Where a definition says what *not* to count, the words after the marker are the look-alikes worth
@@ -37,8 +37,8 @@ EXCLUSION = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 SPLIT = re.compile(r",|\band\b|\bor\b|;")
-# Trimmed only from the front of a candidate phrase. Stripping them everywhere turned "swimming pools in
-# paintings" into "swimming pools paintings" — prepositions carry the meaning of an exclusion.
+# Trimmed only from the front of a candidate phrase. Stripping them everywhere turned "bicycles in
+# paintings" into "bicycles paintings" — prepositions carry the meaning of an exclusion.
 LEADING_FILLER = {
     "items",
     "item",
@@ -83,7 +83,7 @@ def subject_of(tag: dict) -> str:
 
 
 def with_article(subject: str) -> str:
-    """`a kitchen island`, but `floorboards` and `air conditioning` unchanged."""
+    """`a bicycle`, but `stairs` and `air conditioning` unchanged."""
     head = subject.split()[-1] if subject.split() else subject
     if head in NO_ARTICLE_EXACT or head.endswith(NO_ARTICLE_SUFFIX):
         return subject
@@ -93,18 +93,18 @@ def with_article(subject: str) -> str:
 def negatives_of(tag: dict, subject: str, *, limit: int = 4) -> list[str]:
     """Look-alikes named in the definition's exclusion clause, as caption-shaped negatives.
 
-    A clause like "answer false for items that are NOT weight-bearing safety bars, even when they look
-    similar: towel rails, towel rings" names the *feature* before it names the look-alikes, so a colon
-    means everything useful sits behind it. Without that rule the tag's own subject becomes a negative
+    A clause like "answer false for items that are NOT bicycles, even when they look similar: scooters,
+    motorcycles" names the *feature* before it names the look-alikes, so a colon means everything useful
+    sits behind it. Without that rule the tag's own subject becomes a negative
     and subtracts the thing being looked for.
 
-    A phrase that mentions the subject is deliberately kept: "swimming pools in paintings" is the single
-    most useful negative the `pool` definition has, and a rule that drops anything echoing the subject
+    A phrase that mentions the subject is deliberately kept: "bicycles in paintings" can be the single
+    most useful negative a `bicycle` definition has, and a rule that drops anything echoing the subject
     throws away exactly the exclusions worth encoding. Only an exact restatement of the subject goes.
 
-    The text is unwrapped first. These definitions are hard-wrapped in the database, and splitting on
-    the line breaks cut "shower curtain" into "shower" — a negative that would penalise every grab bar
-    photographed in a shower.
+    The text is unwrapped first. Definitions may be hard-wrapped where they are stored, and splitting on
+    the line breaks cuts a two-word look-alike such as "traffic cone" into "traffic" — a negative that
+    would penalise far more images than the exclusion meant.
     """
     found: list[str] = []
     unwrapped = re.sub(r"\s+", " ", tag["question_text"])
@@ -156,8 +156,8 @@ def main() -> int:
         "note": (
             "Caption-shaped prompts per tag. `positive` is what the tag looks like; `negative` is what "
             "it is mistaken for. `reviewed_by` is 'generator' for prompts derived mechanically from the "
-            "tag name, 'agent' once rewritten against the definition, and 'human' only after a person "
-            "has read them."
+            "tag name and 'human' only after a person has read them; any other value is reported "
+            "separately and does not count as reviewed."
         ),
         "tags": entries,
     }
